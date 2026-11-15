@@ -15,6 +15,8 @@ pub struct RecipeFile {
     pub path: PathBuf,
     /// Metadata title, or the file name when no title is present.
     pub title: String,
+    /// Original source, retained for readable fallback when parsing fails.
+    pub source: String,
     /// Parsed content, when the file uses syntax supported by the parser.
     pub recipe: Result<Recipe, String>,
 }
@@ -225,7 +227,7 @@ pub fn read_recipes(root: impl AsRef<Path>) -> io::Result<Vec<RecipeFile>> {
             .map(|(recipe, _warnings)| recipe)
             .map_err(|error| error.to_string());
 
-        Ok(RecipeFile { path, title, recipe })
+        Ok(RecipeFile { path, title, source, recipe })
     }).collect::<io::Result<Vec<_>>>()?;
     recipes.sort_by(|left, right| {
         left.title

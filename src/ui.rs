@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
+use cooklang::{Content, Converter, Item, Recipe, Step, metadata::StdKey};
 
 use crate::repository::{self, Collection, RecipeFile};
 
@@ -237,23 +238,124 @@ fn EmptyState(title: &'static str, detail: &'static str) -> Element {
 
 #[component]
 fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -> Element {
+    let Some(recipe_file) = recipe else {
+        return rsx! {
+            button { class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
+            EmptyState { title: "Recipe unavailable", detail: "Go back to the collection and open another recipe." }
+        };
+    };
+
+    let parsed = recipe_file.recipe.as_ref().ok();
+    let (tags, description, servings, prep_time, cook_time, total_time) = parsed.map(|recipe| {
+        let converter = Converter::default();
+        (
+            recipe.metadata.tags().map(|tags| tags.into_iter().map(|tag| tag.into_owned()).collect::<Vec<_>>()),
+            recipe.metadata.description().map(str::to_owned),
+            recipe.metadata.servings().map(|value| value.to_string()),
+            recipe.metadata.get(StdKey::PrepTime).and_then(|value| cooklang::metadata::CooklangValueExt::as_minutes(value, &converter)),
+            recipe.metadata.get(StdKey::CookTime).and_then(|value| cooklang::metadata::CooklangValueExt::as_minutes(value, &converter)),
+            recipe.metadata.time(&converter).map(|value| value.total()),
+        )
+    }).unwrap_or_default();
+
     rsx! {
         button { class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
-        if let Some(recipe) = recipe {
-            section { class: "detail-card",
+        section { class: "detail-page",
+            header { class: "detail-heading",
                 p { class: "section-label", "RECIPE" }
-                h2 { "{recipe.title}" }
-                p { class: "recipe-file-path", "{recipe.path.display()}" }
-                if let Err(error) = recipe.recipe {
-                    div { class: "notice notice-error", "This recipe could not be parsed: {error}" }
-                } else {
-                    p { class: "muted-copy", "Recipe details are being prepared." }
+                h2 { "{recipe_file.title}" }
+                p { class: "recipe-file-path", "{recipe_file.path.display()}" }
+                if let Some(tags) = tags {
+                    div { class: "tag-list detail-tags",
+                        for tag in tags { span { class: "tag", "{tag}" } }
+                    }
+                }
+                if let Some(description) = description {
+                    p { class: "recipe-description", "{description}" }
+                }
+                div { class: "metadata-strip",
+                    if let Some(servings) = servings { span { "Serves {servings}" } }
+                    if let Some(time) = prep_time { span { "Prep {time} min" } }
+                    if let Some(time) = cook_time { span { "Cook {time} min" } }
+                    if let Some(time) = total_time { span { class: "metadata-total", "Total {time} min" } }
                 }
             }
-        } else {
-            EmptyState { title: "Recipe unavailable", detail: "Go back to the collection and open another recipe." }
+
+            if let Some(parsed) = parsed {
+                if !parsed.ingredients.is_empty() {
+                    section { class: "detail-section ingredients-section",
+                        h3 { "Ingredients" }
+                        ul { class: "ingredient-list",
+                            for ingredient in parsed.ingredients.iter().filter(|ingredient| ingredient.modifiers().should_be_listed()) {
+                                li {
+                                    span { class: "ingredient-amount", "{ingredient.quantity.as_ref().map(ToString::to_string).unwrap_or_default()}" }
+                                    span { class: "ingredient-name", "{ingredient.display_name()}" }
+                                    if let Some(note) = ingredient.note.as_ref() { span { class: "ingredient-note", "{note}" } }
+                                    if ingredient.modifiers().is_optional() { span { class: "optional-label", "optional" } }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                section { class: "detail-section method-section",
+                    h3 { "Method" }
+                    for section in parsed.sections.iter() {
+                        if let Some(name) = section.name.as_ref() { h4 { class: "method-subheading", "{name}" } }
+                        ol { class: "method-steps",
+                            for content in section.content.iter() {
+                                if let Content::Step(step) = content {
+                                    li { class: "method-step", "{render_step(parsed, step)}" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for section in parsed.sections.iter() {
+                    for content in section.content.iter() {
+                        if let Content::Text(text) = content {
+                            aside { class: "recipe-note",
+                                span { class: "note-label", "NOTE" }
+                                p { "{text}" }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if let Err(error) = &recipe_file.recipe {
+                    div { class: "notice notice-error", role: "alert",
+                        strong { "This recipe could not be fully parsed." }
+                        p { "{error}" }
+                        p { "The original source is shown below so no authored text is lost." }
+                    }
+                }
+                pre { class: "source-fallback", "{recipe_file.source}" }
+            }
         }
     }
+}
+
+fn render_step(recipe: &Recipe, step: &Step) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for item in &step.items {
+        let fragment = match item {
+            Item::Text { value } => value.clone(),
+            Item::Ingredient { index } => recipe.ingredients.get(*index)
+                .map(|ingredient| ingredient.display_name().into_owned()).unwrap_or_default(),
+            Item::Cookware { index } => recipe.cookware.get(*index)
+                .map(|cookware| cookware.display_name().to_owned()).unwrap_or_default(),
+            Item::Timer { index } => recipe.timers.get(*index).map(|timer| {
+                let label = timer.name.as_deref().unwrap_or("Timer");
+                timer.quantity.as_ref().map(|quantity| format!("⏱ {label}: {quantity}")).unwrap_or_else(|| format!("⏱ {label}"))
+            }).unwrap_or_default(),
+            Item::InlineQuantity { index } => recipe.inline_quantities.get(*index)
+                .map(ToString::to_string).unwrap_or_default(),
+        };
+        let _ = write!(text, "{fragment}");
+    }
+    text
 }
 
 fn connect_collection(state: Signal<BrowserState>) {
