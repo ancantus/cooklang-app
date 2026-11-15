@@ -1,6 +1,11 @@
-use std::{fs, io, path::{Path, PathBuf}};
+use std::{
+    fs, io,
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
 
-use cooklang::{CooklangParser, Recipe, metadata::{CooklangValueExt, StdKey}};
+use cooklang::{CooklangParser, Converter, Extensions, Recipe, metadata::{CooklangValueExt, StdKey}};
 
 /// A Cooklang file found in a repository checkout.
 #[derive(Debug)]
@@ -13,6 +18,54 @@ pub struct RecipeFile {
     pub recipe: Result<Recipe, String>,
 }
 
+/// Shallow-clone a GitHub repository into `destination`.
+///
+/// The optional user access token is held only by the credential callback and
+/// is never written to the remote URL or repository configuration.
+pub fn clone_github_repository(
+    url: &str,
+    destination: impl AsRef<Path>,
+    user_access_token: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use gix::credentials::{
+        helper::Action,
+        protocol::Outcome as CredentialOutcome,
+    };
+
+    let token = user_access_token.map(str::to_owned);
+    let mut clone = gix::prepare_clone(url, destination)?
+        .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+            NonZeroU32::new(1).expect("one is non-zero"),
+        ))
+        .configure_connection(move |connection| {
+            let token = token.clone();
+            connection.set_credentials(move |action| match action {
+                Action::Get(context)
+                    if context.host.as_deref() == Some("github.com")
+                        && token.is_some() =>
+                {
+                    let token = token.as_ref().expect("checked above");
+                    let next = context.into();
+                    Ok(Some(CredentialOutcome {
+                        identity: gix::sec::identity::Account {
+                            username: "x-access-token".to_owned(),
+                            password: token.clone(),
+                            oauth_refresh_token: None,
+                        },
+                        next,
+                    }))
+                }
+                Action::Get(_) | Action::Store(_) | Action::Erase(_) => Ok(None),
+            });
+            Ok(())
+        });
+
+    let interrupted = AtomicBool::new(false);
+    let (mut checkout, _) = clone.fetch_then_checkout(gix::progress::Discard, &interrupted)?;
+    checkout.main_worktree(gix::progress::Discard, &interrupted)?;
+    Ok(())
+}
+
 /// Recursively find and parse lowercase `.cook` files under `root`.
 ///
 /// Paths are sorted to provide stable ordering. Files that fail to parse remain
@@ -23,8 +76,8 @@ pub fn read_recipes(root: impl AsRef<Path>) -> io::Result<Vec<RecipeFile>> {
     collect_recipe_paths(root, root, &mut paths)?;
     paths.sort();
 
-    let parser = CooklangParser::default();
-    paths.into_iter().map(|path| {
+    let parser = CooklangParser::new(Extensions::empty(), Converter::default());
+    let mut recipes = paths.into_iter().map(|path| {
         let source = fs::read_to_string(root.join(&path))?;
         let parsed = parser.parse(&source);
         let title = parsed
@@ -44,7 +97,14 @@ pub fn read_recipes(root: impl AsRef<Path>) -> io::Result<Vec<RecipeFile>> {
             .map_err(|error| error.to_string());
 
         Ok(RecipeFile { path, title, recipe })
-    }).collect()
+    }).collect::<io::Result<Vec<_>>>()?;
+    recipes.sort_by(|left, right| {
+        left.title
+            .to_lowercase()
+            .cmp(&right.title.to_lowercase())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(recipes)
 }
 
 fn collect_recipe_paths(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
