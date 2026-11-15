@@ -6,6 +6,6 @@ license = "MIT"
 description = "Android client for Cooklang recipes"
 
 [dependencies]
-cooklang = { version = "0.19", default-features = false }
+cooklang = { version = "0.19", default-features = false, features = ["aisle"] }
 dioxus = { version = "0.7", features = ["mobile"] }
 gix = { version = "0.90", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
