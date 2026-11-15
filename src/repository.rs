@@ -28,9 +28,8 @@ pub fn read_recipes(root: impl AsRef<Path>) -> io::Result<Vec<RecipeFile>> {
         let source = fs::read_to_string(root.join(&path))?;
         let parsed = parser.parse(&source);
         let title = parsed
-            .as_ref()
-            .ok()
-            .and_then(|(recipe, _)| recipe.metadata.get(StdKey::Title))
+            .output()
+            .and_then(|recipe| recipe.metadata.get(StdKey::Title))
             .and_then(CooklangValueExt::as_str_like)
             .map(|title| title.into_owned())
             .unwrap_or_else(|| {
