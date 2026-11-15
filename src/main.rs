@@ -1,4 +1,4 @@
-mod repository;
+pub mod repository;
 
 use dioxus::prelude::*;
 
