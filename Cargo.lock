@@ -590,6 +590,7 @@ dependencies = [
  "dioxus",
  "futures-channel",
  "gix",
+ "robius-directories",
 ]
 
 [[package]]
@@ -5218,6 +5219,27 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "robius-android-env"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "087fcb3061ccc432658a605cb868edd44e0efb08e7a159b486f02804a7616bef"
+dependencies = [
+ "jni 0.21.1",
+ "ndk-context",
+]
+
+[[package]]
+name = "robius-directories"
+version = "6.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6226ef6667258c14b4d84d1380c37649ad517d1bcdf6401b7db06552058e9679"
+dependencies = [
+ "dirs-sys",
+ "jni 0.21.1",
+ "robius-android-env",
 ]
 
 [[package]]
