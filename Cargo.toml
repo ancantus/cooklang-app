@@ -1,0 +1,9 @@
+[package]
+name = "cooklang-client-android"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Android client for Cooklang recipes"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["mobile"] }

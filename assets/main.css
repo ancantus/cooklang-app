@@ -1,0 +1,27 @@
+:root {
+    font-family: system-ui, sans-serif;
+    color: #20231f;
+    background-color: #f7f6f0;
+}
+
+body {
+    margin: 0;
+}
+
+main {
+    max-width: 42rem;
+    margin: 0 auto;
+    padding: 2rem 1.25rem;
+}
+
+h1 {
+    margin-bottom: 0.25rem;
+    color: #315b3c;
+}
+
+.empty-state {
+    margin-top: 2rem;
+    padding: 1.5rem;
+    border-radius: 1rem;
+    background: white;
+}

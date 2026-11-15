@@ -1,0 +1,6 @@
+[application]
+name = "Cooklang"
+default_platform = "android"
+
+[bundle]
+identifier = "org.cooklang.client"
