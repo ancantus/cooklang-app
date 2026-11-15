@@ -1,3 +1,5 @@
+mod repository;
+
 use dioxus::prelude::*;
 
 fn main() {
