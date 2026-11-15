@@ -3,12 +3,13 @@ use std::{
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use cooklang::{CooklangParser, Converter, Extensions, Recipe, metadata::{CooklangValueExt, StdKey}};
 
 /// A Cooklang file found in a repository checkout.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecipeFile {
     /// Path relative to the checkout root.
     pub path: PathBuf,
@@ -16,6 +17,134 @@ pub struct RecipeFile {
     pub title: String,
     /// Parsed content, when the file uses syntax supported by the parser.
     pub recipe: Result<Recipe, String>,
+}
+
+/// A connected repository and the recipes currently available from its checkout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Collection {
+    pub url: String,
+    pub path: PathBuf,
+    pub recipes: Vec<RecipeFile>,
+}
+
+/// Read the last connected checkout, if one was saved on this device.
+pub fn load_saved_collection() -> Result<Option<Collection>, String> {
+    let saved_url = settings_path();
+    if !saved_url.is_file() {
+        return Ok(None);
+    }
+    let url = fs::read_to_string(saved_url).map_err(|error| error.to_string())?;
+    let (url, owner, name) = normalize_github_url(&url)?;
+    let path = collection_path(&owner, &name)?;
+    if !path.is_dir() {
+        return Ok(None);
+    }
+    let recipes = read_recipes(&path).map_err(|error| error.to_string())?;
+    Ok(Some(Collection { url, path, recipes }))
+}
+
+/// Connect to a GitHub repository or refresh its existing checkout.
+pub fn connect_or_refresh(input: &str) -> Result<Collection, String> {
+    let (url, owner, name) = normalize_github_url(input)?;
+    let destination = collection_path(&owner, &name)?;
+    if destination.exists() {
+        refresh_checkout(&url, &destination)?;
+    } else {
+        fs::create_dir_all(destination.parent().expect("collection path has a parent"))
+            .map_err(|error| error.to_string())?;
+        clone_github_repository(&url, &destination, None).map_err(|error| error.to_string())?;
+    }
+
+    let recipes = read_recipes(&destination).map_err(|error| error.to_string())?;
+    save_url(&url)?;
+    Ok(Collection { url, path: destination, recipes })
+}
+
+/// Remove a connected checkout and its saved repository selection.
+pub fn disconnect(url: &str) -> Result<(), String> {
+    let (_url, owner, name) = normalize_github_url(url)?;
+    let path = collection_path(&owner, &name)?;
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|error| error.to_string())?;
+    }
+    let saved_url = settings_path();
+    if saved_url.exists() {
+        fs::remove_file(saved_url).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn normalize_github_url(input: &str) -> Result<(String, String, String), String> {
+    let input = input.trim();
+    let path = input
+        .strip_prefix("https://github.com/")
+        .or_else(|| input.strip_prefix("http://github.com/"))
+        .or_else(|| input.strip_prefix("github.com/"))
+        .unwrap_or(input)
+        .trim_end_matches('/')
+        .strip_suffix(".git")
+        .unwrap_or_else(|| {
+            input
+                .strip_prefix("https://github.com/")
+                .or_else(|| input.strip_prefix("http://github.com/"))
+                .or_else(|| input.strip_prefix("github.com/"))
+                .unwrap_or(input)
+                .trim_end_matches('/')
+        });
+    let mut parts = path.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let valid_segment = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.chars().all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    };
+    if parts.next().is_some() || !valid_segment(owner) || !valid_segment(name) {
+        return Err("Enter a GitHub repository as owner/repository or a github.com URL.".to_owned());
+    }
+    Ok((format!("https://github.com/{owner}/{name}.git"), owner.to_owned(), name.to_owned()))
+}
+
+fn app_data_dir() -> Result<PathBuf, String> {
+    let project = robius_directories::ProjectDirs::from("org", "cooklang", "Cooklang Client")
+        .ok_or_else(|| "The app data directory is unavailable on this device.".to_owned())?;
+    Ok(project.data_local_dir().to_owned())
+}
+
+fn collection_path(owner: &str, name: &str) -> Result<PathBuf, String> {
+    Ok(app_data_dir()?.join("collections").join(owner).join(name))
+}
+
+fn settings_path() -> PathBuf {
+    app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("cooklang-client"))
+        .join("connected-repository")
+}
+
+fn save_url(url: &str) -> Result<(), String> {
+    let path = settings_path();
+    fs::create_dir_all(path.parent().expect("settings file has a parent"))
+        .map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, url).map_err(|error| error.to_string())?;
+    fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+fn refresh_checkout(url: &str, destination: &Path) -> Result<(), String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let temporary = destination.with_file_name(format!("refresh-{nonce}"));
+    let backup = destination.with_file_name(format!("previous-{nonce}"));
+    clone_github_repository(url, &temporary, None).map_err(|error| error.to_string())?;
+    fs::rename(destination, &backup).map_err(|error| error.to_string())?;
+    if let Err(error) = fs::rename(&temporary, destination) {
+        let _ = fs::rename(&backup, destination);
+        return Err(error.to_string());
+    }
+    fs::remove_dir_all(backup).map_err(|error| error.to_string())
 }
 
 /// Shallow-clone a GitHub repository into `destination`.
