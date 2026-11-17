@@ -1,0 +1,22 @@
+# Injected into wry's WryActivity.kt at build time (see wry build.rs:
+# WRY_WRYACTIVITY_CLASS_EXTENSION). The WebView teardown path that runs when
+# the activity finishes crashes with a FORTIFY "pthread_mutex_lock called on
+# a destroyed mutex" abort on Android 15, killing the app on the system BACK
+# key. An always-enabled back callback backgrounds the app instead of
+# finishing the activity; the in-app "‹ Back to recipes" button handles
+# navigation from the recipe detail screen. (onKeyDown and the common
+# lifecycle methods are already defined by wry's template, so hook into
+# onPostCreate instead.)
+[env]
+WRY_WRYACTIVITY_CLASS_EXTENSION = """
+private val backGuard = object : androidx.activity.OnBackPressedCallback(true) {
+    override fun handleOnBackPressed() {
+        moveTaskToBack(true)
+    }
+}
+
+override fun onPostCreate(savedInstanceState: Bundle?) {
+    super.onPostCreate(savedInstanceState)
+    onBackPressedDispatcher.addCallback(this, backGuard)
+}
+"""
