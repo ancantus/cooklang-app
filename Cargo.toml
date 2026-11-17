@@ -10,4 +10,7 @@ cooklang = { version = "0.19", default-features = false, features = ["aisle"] }
 dioxus = { version = "0.7", features = ["mobile"] }
 futures-channel = "0.3"
 gix = { version = "0.90", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
+jni = "0.22"
+ndk-context = "0.1"
 robius-directories = "6.0.1"
+rustls-platform-verifier = "=0.7.1"

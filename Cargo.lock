@@ -590,7 +590,10 @@ dependencies = [
  "dioxus",
  "futures-channel",
  "gix",
+ "jni 0.22.4",
+ "ndk-context",
  "robius-directories",
+ "rustls-platform-verifier",
 ]
 
 [[package]]
