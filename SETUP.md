@@ -60,6 +60,33 @@ Artifact:
 
 `target/dx/cooklang-client-android/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`
 
+## Machine-local Gradle init script (rustls TLS support)
+
+Dioxus regenerates the Gradle project under `target/dx/.../android/` on every
+build, so Gradle settings cannot be edited there directly. The reqwest/rustls
+HTTP transport used by `gix` relies on `rustls-platform-verifier`, whose
+certificate-verification class (`org.rustls.platformverifier.CertificateVerifier`)
+is a Kotlin component that must be bundled into the APK. It is supplied with a
+machine-local Gradle init script at `~/.gradle/init.d/cooklang-rustls-verifier.gradle`:
+
+- Adds the Maven repository
+  `https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/`
+  to all projects.
+- Adds the dependency `org.rustls:rustls-platform-verifier:0.2.0` to the `app`
+  subproject after evaluation.
+
+The dependency version must track `rustls-platform-verifier-android` in
+`Cargo.lock` (currently `0.2.0`); bump the init script if that crate version
+changes. Verify the class made it into the APK after a build:
+
+```sh
+unzip -l target/dx/cooklang-client-android/debug/android/app/app/build/outputs/apk/debug/app-debug.apk | grep classes
+# then grep the dex files for "CertificateVerifier" if in doubt
+```
+
+Without this, the app builds but the first HTTPS clone fails with
+`ClassNotFoundException: org.rustls.platformverifier.CertificateVerifier`.
+
 ## Emulator and T3 Code hookup
 
 The SDK emulator and Android 35 Google APIs x86_64 image are installed, and the `Cooklang_API_35` AVD was created. However, `emulator -accel-check` reports `/dev/kvm` is missing. On Linux, Android's accelerated emulator depends on KVM; software emulation may be very slow or unavailable.
@@ -73,3 +100,49 @@ emulator -avd Cooklang_API_35
 ```
 
 Once it is running, `adb devices` should list it as `device`; run `dx serve --android` in the T3 Code terminal. A physical Android device is another option: enable Developer options and USB debugging, connect it to this same machine, authorize the computer on the device, and confirm it appears as `device` in `adb devices`. No Android device was connected during this setup.
+
+## Emulator workflow notes
+
+- The host has ~7.6 GB RAM and 4 cores; the emulator runs headless with
+  software GPU rendering. Launch it fully detached so it survives the shell
+  session that started it:
+
+  ```sh
+  source ./android-env.sh
+  setsid nohup emulator -avd Cooklang_API_35 -no-snapshot -no-audio -no-window \
+    -gpu swiftshader_indirect >/tmp/cooklang-emulator.log 2>&1 </dev/null &
+  ```
+
+- Boot takes ~65–90 s (`adb shell getprop sys.boot_completed` becomes `1`).
+  App data persists across boots; the app stays installed and its saved
+  collection (files/connected-repository, files/collections/...) survives
+  restarts.
+- System UI ANRs ("System UI isn't responding") recur under load. Dismiss
+  with Wait, or restart System UI: `adb root && adb shell killall com.android.systemui`.
+- Animations are disabled (`window_animation_scale`, `transition_animation_scale`,
+  `animator_duration_scale` = 0) and `com.google.android.googlequicksearchbox`
+  is disabled to reduce load.
+- Rebuild + install loop:
+
+  ```sh
+  source ./android-env.sh
+  dx bundle --android --package-types apk
+  adb install -r target/dx/cooklang-client-android/debug/android/app/app/build/outputs/apk/debug/app-debug.apk
+  adb shell am force-stop org.cooklang.client && adb shell monkey -p org.cooklang.client 1
+  ```
+
+  Wait ~12 s after launch before interacting; the first screenshot after
+  launch may show an ANR dialog over the app.
+- Screenshot pixel coordinates are 0.83× of the real device coordinates:
+  multiply the displayed position by 1.2 for `adb shell input tap`. The
+  connect screen's input is around real (540, 1040) and the Connect button
+  around (540, 1200).
+- Type text into the WebView char-by-char (`adb shell input text "$c"` per
+  character with ~0.2 s pauses). Word-sized `input text` commits get mangled
+  by the Gboard autocorrect pipeline.
+- Do not send `KEYCODE_ESCAPE` (111) or the system BACK key (4) with the IME
+  down: both reach the WebView and hit a framework-level FORTIFY
+  "pthread_mutex_lock called on a destroyed mutex" abort that kills the
+  process. Use BACK only while the IME is up (the IME consumes it). The
+  shipped workaround backgrounds the app on BACK instead of finishing the
+  activity (see `.cargo/config.toml`).
