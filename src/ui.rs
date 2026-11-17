@@ -103,7 +103,10 @@ fn RepositorySetup(
                 label { r#for: "repository-url", "GitHub repository" }
                 input {
                     id: "repository-url",
-                    r#type: "url",
+                    r#type: "text",
+                    inputmode: "url",
+                    autocapitalize: "off",
+                    spellcheck: false,
                     placeholder: "https://github.com/owner/recipes",
                     value: input.clone(),
                     oninput: move |event| on_input.call(event.value()),
