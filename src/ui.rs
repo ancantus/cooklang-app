@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -61,7 +60,15 @@ struct TimerPrompt {
 }
 
 fn load_active_timers() -> Vec<TimerEntry> {
-    timers::load_timers()
+    let mut entries = timers::load_timers();
+    let saved_count = entries.len();
+    entries.retain(|entry| !entry.notified);
+    if entries.len() != saved_count {
+        if let Err(error) = timers::save_timers(&entries) {
+            eprintln!("Removing announced timers from storage failed: {error}");
+        }
+    }
+    entries
 }
 
 fn persist_timers() {
@@ -126,8 +133,19 @@ fn timer_add_minute(id: String) {
     ACTIVE_TIMERS.with_mut(|list| {
         if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
             match entry.deadline_ms {
-                Some(deadline) => entry.deadline_ms = Some(deadline.max(now) + 60_000),
-                None => entry.paused_remaining_secs += 60,
+                Some(deadline) if deadline > now => {
+                    entry.deadline_ms = Some(deadline + 60_000);
+                    entry.total_secs += 60;
+                }
+                Some(_) => {
+                    entry.deadline_ms = Some(now + 60_000);
+                    entry.total_secs = 60;
+                    entry.notified = false;
+                }
+                None => {
+                    entry.paused_remaining_secs += 60;
+                    entry.total_secs += 60;
+                }
             }
         }
     });
@@ -141,6 +159,7 @@ fn timer_restart(id: String) {
         if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
             entry.deadline_ms = Some(now + u128::from(entry.total_secs) * 1000);
             entry.paused_remaining_secs = 0;
+            entry.notified = false;
         }
     });
     persist_timers();
@@ -160,19 +179,21 @@ fn timer_cancel(id: String) {
 fn start_timer_ticker() {
     use_effect(move || {
         dioxus::core::spawn_forever(async move {
-            let mut announced: HashSet<String> = HashSet::new();
             loop {
                 let now = timers::now_ms();
-                let finished: HashSet<String> = ACTIVE_TIMERS
+                let has_unannounced_finished = ACTIVE_TIMERS
                     .read()
                     .iter()
-                    .filter(|entry| entry.is_finished(now))
-                    .map(|entry| entry.id.clone())
-                    .collect();
-                if finished.iter().any(|id| !announced.contains(id)) {
+                    .any(|entry| entry.is_finished(now) && !entry.notified);
+                if has_unannounced_finished {
                     announce_finished_timer();
+                    ACTIVE_TIMERS.with_mut(|entries| {
+                        for entry in entries.iter_mut().filter(|entry| entry.is_finished(now)) {
+                            entry.notified = true;
+                        }
+                    });
+                    persist_timers();
                 }
-                announced = finished;
                 let counting = ACTIVE_TIMERS
                     .read()
                     .iter()
@@ -678,8 +699,8 @@ fn TimerBar() -> Element {
     let now = timers::now_ms();
     rsx! {
         div { class: "timer-bar", id: "timer-bar",
-            for entry in timers_snapshot {
-                TimerChip { key: "{entry.id}", entry, now }
+            for (index, entry) in timers_snapshot.into_iter().enumerate() {
+                TimerChip { key: "{entry.id}", entry, now, color_index: index % 5 }
             }
         }
     }
@@ -687,7 +708,7 @@ fn TimerBar() -> Element {
 
 /// One timer chip with its countdown and full controls.
 #[component]
-fn TimerChip(entry: TimerEntry, now: u128) -> Element {
+fn TimerChip(entry: TimerEntry, now: u128, color_index: usize) -> Element {
     let id = entry.id.clone();
     let pause_id = id.clone();
     let add_minute_id = id.clone();
@@ -709,8 +730,22 @@ fn TimerChip(entry: TimerEntry, now: u128) -> Element {
     } else {
         "chip-running"
     };
+    let remaining_secs = if finished {
+        0
+    } else if paused {
+        entry.paused_remaining_secs
+    } else {
+        entry.remaining_secs(now)
+    };
+    let progress = if entry.total_secs == 0 {
+        100.0
+    } else {
+        (1.0 - remaining_secs as f64 / entry.total_secs as f64).clamp(0.0, 1.0) * 100.0
+    };
     rsx! {
-        div { class: "timer-chip {state_class}",
+        div {
+            class: "timer-chip {state_class} timer-color-{color_index}",
+            style: "--timer-progress: {progress}%",
             div { class: "timer-chip-main",
                 span { class: "timer-chip-time", "{time_text}" }
                 span { class: "timer-chip-label", "{entry.label}" }

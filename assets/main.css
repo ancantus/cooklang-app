@@ -259,43 +259,60 @@ button:disabled { cursor: default; opacity: .58; }
 .timer-bar {
     position: fixed;
     z-index: 5;
-    right: max(.65rem, env(safe-area-inset-right));
-    bottom: max(.65rem, env(safe-area-inset-bottom));
-    left: max(.65rem, env(safe-area-inset-left));
-    display: flex;
-    max-width: 44rem;
-    gap: .55rem;
-    margin: 0 auto;
-    padding: .5rem;
-    overflow-x: auto;
-    border: 1px solid rgba(214, 222, 211, .92);
-    border-radius: 1rem;
-    background: rgba(255, 254, 250, .96);
-    box-shadow: 0 8px 30px rgba(34, 48, 38, .18);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    display: grid;
+    gap: .4rem;
+    max-height: min(48vh, 22rem);
+    padding: .55rem max(.65rem, env(safe-area-inset-right)) calc(.55rem + env(safe-area-inset-bottom)) max(.65rem, env(safe-area-inset-left));
+    overflow-y: auto;
+    border-top: 1px solid rgba(214, 222, 211, .96);
+    border-radius: 1rem 1rem 0 0;
+    background: rgba(255, 254, 250, .97);
+    box-shadow: 0 -8px 30px rgba(34, 48, 38, .14);
     -webkit-backdrop-filter: blur(12px);
     backdrop-filter: blur(12px);
-    scrollbar-width: thin;
+    scrollbar-width: none;
 }
 .timer-chip {
+    position: relative;
     display: flex;
-    min-width: 15rem;
-    flex: 0 0 auto;
+    width: 100%;
+    min-width: 0;
+    min-height: 3rem;
     align-items: center;
-    gap: .65rem;
-    padding: .45rem .55rem .45rem .75rem;
-    border: 1px solid #e3e9e0;
+    gap: .5rem;
+    padding: .35rem .4rem .35rem .65rem;
+    overflow: hidden;
+    border: 1px solid rgba(126, 151, 128, .22);
     border-radius: .75rem;
-    background: #f8faf6;
+    background: var(--timer-track, #f3f6f0);
 }
-.timer-chip-main { display: grid; min-width: 0; flex: 1; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; column-gap: .45rem; }
-.timer-chip-time { color: var(--green-dark); font-size: .9rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.timer-chip-label { overflow: hidden; color: #34463a; font-size: .76rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.timer-chip-sub { overflow: hidden; grid-column: 1 / -1; color: #89928b; font-size: .65rem; text-overflow: ellipsis; white-space: nowrap; }
-.timer-chip-actions { display: flex; flex: 0 0 auto; gap: .16rem; }
-.chip-button { display: inline-grid; min-width: 1.9rem; min-height: 1.9rem; place-items: center; padding: 0 .25rem; border: 0; border-radius: .5rem; color: #5e7063; background: #edf2eb; cursor: pointer; font-size: .76rem; font-weight: 750; }
+.timer-chip::before {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: var(--timer-progress, 0%);
+    border-radius: inherit;
+    background: var(--timer-fill, #dcebd9);
+    content: "";
+    transition: width .45s linear;
+}
+.timer-color-0 { --timer-fill: #dcebd9; --timer-track: #f2f6ef; }
+.timer-color-1 { --timer-fill: #d9e7de; --timer-track: #f1f6f2; }
+.timer-color-2 { --timer-fill: #f0e4cb; --timer-track: #faf6ed; }
+.timer-color-3 { --timer-fill: #e8dcd1; --timer-track: #f8f3ee; }
+.timer-color-4 { --timer-fill: #dce5e9; --timer-track: #f1f5f6; }
+.timer-chip-main { z-index: 1; display: flex; min-width: 0; flex: 1; align-items: baseline; gap: .55rem; }
+.timer-chip-time { flex: 0 0 auto; color: var(--green-dark); font-size: .95rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timer-chip-label { overflow: hidden; color: #34463a; font-size: .76rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.timer-chip-sub { overflow: hidden; color: #89928b; font-size: .65rem; text-overflow: ellipsis; white-space: nowrap; }
+.timer-chip-actions { z-index: 1; display: flex; flex: 0 0 auto; gap: .16rem; margin-left: auto; }
+.chip-button { display: inline-grid; min-width: 1.9rem; min-height: 1.9rem; place-items: center; padding: 0 .25rem; border: 0; border-radius: .5rem; color: #4e6254; background: rgba(255, 255, 255, .72); cursor: pointer; font-size: .76rem; font-weight: 750; }
 .chip-button:hover { color: var(--green-dark); background: #dfeade; }
 .chip-done { border-color: #efd8bd; background: #fff6eb; }
 .chip-done .timer-chip-time { color: #9a592f; }
+.chip-done::before { width: 100%; background: #f0dfcf; }
 .chip-paused { border-color: #eadfbd; background: #fcf8ec; }
 .chip-paused .timer-chip-time { color: #806a35; }
 
@@ -317,11 +334,6 @@ button:disabled { cursor: default; opacity: .58; }
 
 /* Keep recipe content reachable above the docked timers. */
 .detail-page { margin-bottom: 5.8rem; }
-@media (max-width: 420px) {
-    .timer-chip { min-width: 13.5rem; }
-    .timer-chip-sub { max-width: 7rem; }
-    .chip-button { min-width: 1.75rem; min-height: 1.75rem; }
-}
 
 @media (min-width: 600px) {
     .app-shell { padding-right: 1.5rem; padding-left: 1.5rem; }

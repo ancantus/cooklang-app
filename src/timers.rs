@@ -32,6 +32,10 @@ pub struct TimerEntry {
     pub deadline_ms: Option<u128>,
     /// Seconds left when the timer was paused; unused while running.
     pub paused_remaining_secs: u64,
+    /// Whether the timer's completion has been announced; announced timers are
+    /// discarded from persistence the next time the app starts.
+    #[serde(default)]
+    pub notified: bool,
 }
 
 impl TimerEntry {
@@ -50,6 +54,7 @@ impl TimerEntry {
             total_secs,
             deadline_ms: Some(now_ms + u128::from(total_secs) * 1000),
             paused_remaining_secs: 0,
+            notified: false,
         }
     }
 
