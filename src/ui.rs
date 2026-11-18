@@ -243,7 +243,7 @@ fn EmptyState(title: &'static str, detail: &'static str) -> Element {
 fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -> Element {
     let Some(recipe_file) = recipe else {
         return rsx! {
-            button { class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
+            button { id: "recipe-back-button", class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
             EmptyState { title: "Recipe unavailable", detail: "Go back to the collection and open another recipe." }
         };
     };
@@ -262,7 +262,7 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
     }).unwrap_or_default();
 
     rsx! {
-        button { class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
+        button { id: "recipe-back-button", class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
         section { class: "detail-page",
             header { class: "detail-heading",
                 p { class: "section-label", "RECIPE" }

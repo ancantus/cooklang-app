@@ -56,9 +56,11 @@ A debug APK build completed successfully with:
 dx bundle --android --package-types apk
 ```
 
-Artifact:
+Artifact (x86_64, for the emulator):
 
 `target/dx/cooklang-client-android/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`
+
+The APK contains only the default target's native library (`lib/x86_64/libmain.so`); the default is `x86_64-linux-android`. Building with `--target aarch64-linux-android` writes to the same path and adds `lib/arm64-v8a/libmain.so` (both ABIs can be present after back-to-back builds). For a physical arm64 phone, build with `--target aarch64-linux-android` (see README).
 
 ## Machine-local Gradle init script (rustls TLS support)
 
@@ -89,17 +91,20 @@ Without this, the app builds but the first HTTPS clone fails with
 
 ## Emulator and T3 Code hookup
 
-The SDK emulator and Android 35 Google APIs x86_64 image are installed, and the `Cooklang_API_35` AVD was created. However, `emulator -accel-check` reports `/dev/kvm` is missing. On Linux, Android's accelerated emulator depends on KVM; software emulation may be very slow or unavailable.
+The SDK emulator and Android 35 Google APIs x86_64 image are installed, and the `Cooklang_API_35` AVD was created. KVM is available on this host: `/dev/kvm` exists and `emulator -accel-check` reports "KVM (version 12) is installed and usable", so the emulator runs accelerated.
 
-For a usable emulator, enable CPU virtualization in firmware and make `/dev/kvm` available to this user. Then check:
+Daily driver (from the project root):
 
 ```sh
 source ./android-env.sh
-emulator -accel-check
-emulator -avd Cooklang_API_35
+setsid nohup emulator -avd Cooklang_API_35 -no-snapshot -no-audio -no-window \
+  -gpu swiftshader_indirect >/tmp/cooklang-emulator.log 2>&1 </dev/null &
+adb shell getprop sys.boot_completed   # becomes 1 after ~65-90 s
 ```
 
-Once it is running, `adb devices` should list it as `device`; run `dx serve --android` in the T3 Code terminal. A physical Android device is another option: enable Developer options and USB debugging, connect it to this same machine, authorize the computer on the device, and confirm it appears as `device` in `adb devices`. No Android device was connected during this setup.
+Once it is running, `adb devices` lists it as `device`; then run `dx serve --android` or install a bundled APK (see README). The default `dx bundle --android` builds the `x86_64-linux-android` target, which is exactly what the emulator needs.
+
+A physical Android device is another option: enable Developer options and USB debugging, connect it to this same machine, authorize the computer on the device, and confirm it appears as `device` in `adb devices`. For a phone, builds must use `--target aarch64-linux-android` because the default x86_64 APK only contains an x86_64 `libmain.so` and will fail to install on arm64 hardware. See the README "Install and test on a physical phone" section for the full workflow. No Android device was connected during the original setup.
 
 ## Emulator workflow notes
 
@@ -141,8 +146,17 @@ Once it is running, `adb devices` should list it as `device`; run `dx serve --an
   character with ~0.2 s pauses). Word-sized `input text` commits get mangled
   by the Gboard autocorrect pipeline.
 - Do not send `KEYCODE_ESCAPE` (111) or the system BACK key (4) with the IME
-  down: both reach the WebView and hit a framework-level FORTIFY
+  down: ESC reaches the WebView and hits a framework-level FORTIFY
   "pthread_mutex_lock called on a destroyed mutex" abort that kills the
-  process. Use BACK only while the IME is up (the IME consumes it). The
-  shipped workaround backgrounds the app on BACK instead of finishing the
-  activity (see `.cargo/config.toml`).
+  process. BACK used to be equally fatal when it finished the activity; the
+  build-time Kotlin hook in `.cargo/config.toml` now handles BACK safely:
+  while a recipe detail screen is open it clicks the in-app "‹ Back to
+  recipes" button (returning to the list), otherwise it backgrounds the app
+  with `moveTaskToBack`. The activity is never finished, so the crash path
+  is never reached. The IME still consumes BACK while it is up (closes the
+  keyboard).
+- Unit tests exist for the repository logic (`src/repository.rs`,
+  exposed through `src/lib.rs`). Run them on the host with
+  `cargo test --no-default-features`; plain `cargo test` compiles the
+  Dioxus app for the host too and needs glib/gtk development headers that
+  are not installed on this machine.
