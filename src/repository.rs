@@ -29,6 +29,13 @@ pub struct Collection {
     pub recipes: Vec<RecipeFile>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubRepository {
+    url: String,
+    owner: String,
+    name: String,
+}
+
 /// Read the last connected checkout, if one was saved on this device.
 pub fn load_saved_collection() -> Result<Option<Collection>, String> {
     let saved_url = settings_path();
@@ -36,36 +43,36 @@ pub fn load_saved_collection() -> Result<Option<Collection>, String> {
         return Ok(None);
     }
     let url = fs::read_to_string(saved_url).map_err(|error| error.to_string())?;
-    let (url, owner, name) = normalize_github_url(&url)?;
-    let path = collection_path(&owner, &name)?;
+    let repository = normalize_github_url(&url)?;
+    let path = collection_path(&repository.owner, &repository.name)?;
     if !path.is_dir() {
         return Ok(None);
     }
     let recipes = read_recipes(&path).map_err(|error| error.to_string())?;
-    Ok(Some(Collection { url, path, recipes }))
+    Ok(Some(Collection { url: repository.url, path, recipes }))
 }
 
 /// Connect to a GitHub repository or refresh its existing checkout.
 pub fn connect_or_refresh(input: &str) -> Result<Collection, String> {
-    let (url, owner, name) = normalize_github_url(input)?;
-    let destination = collection_path(&owner, &name)?;
+    let repository = normalize_github_url(input)?;
+    let destination = collection_path(&repository.owner, &repository.name)?;
     if destination.exists() {
-        refresh_checkout(&url, &destination)?;
+        refresh_checkout(&repository.url, &destination)?;
     } else {
         fs::create_dir_all(destination.parent().expect("collection path has a parent"))
             .map_err(|error| error.to_string())?;
-        clone_github_repository(&url, &destination, None).map_err(|error| error.to_string())?;
+        clone_github_repository(&repository.url, &destination, None).map_err(|error| error.to_string())?;
     }
 
     let recipes = read_recipes(&destination).map_err(|error| error.to_string())?;
-    save_url(&url)?;
-    Ok(Collection { url, path: destination, recipes })
+    save_url(&repository.url)?;
+    Ok(Collection { url: repository.url, path: destination, recipes })
 }
 
 /// Remove a connected checkout and its saved repository selection.
 pub fn disconnect(url: &str) -> Result<(), String> {
-    let (_url, owner, name) = normalize_github_url(url)?;
-    let path = collection_path(&owner, &name)?;
+    let repository = normalize_github_url(url)?;
+    let path = collection_path(&repository.owner, &repository.name)?;
     if path.exists() {
         fs::remove_dir_all(path).map_err(|error| error.to_string())?;
     }
@@ -76,7 +83,7 @@ pub fn disconnect(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_github_url(input: &str) -> Result<(String, String, String), String> {
+fn normalize_github_url(input: &str) -> Result<GithubRepository, String> {
     const HOST_PREFIXES: [&str; 6] = [
         "https://github.com/",
         "https://www.github.com/",
@@ -108,59 +115,16 @@ fn normalize_github_url(input: &str) -> Result<(String, String, String), String>
     if parts.next().is_some() || !valid_segment(owner) || !valid_segment(name) {
         return Err("Enter a GitHub repository as owner/repository or a github.com URL.".to_owned());
     }
-    Ok((format!("https://github.com/{owner}/{name}.git"), owner.to_owned(), name.to_owned()))
+    Ok(GithubRepository {
+        url: format!("https://github.com/{owner}/{name}.git"),
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn normalized(input: &str) -> (String, String, String) {
-        normalize_github_url(input).expect("input should be accepted")
-    }
-
-    #[test]
-    fn accepts_owner_repository_shorthand() {
-        assert_eq!(
-            normalized("cooklang/recipes"),
-            ("https://github.com/cooklang/recipes.git".to_owned(), "cooklang".to_owned(), "recipes".to_owned())
-        );
-    }
-
-    #[test]
-    fn accepts_full_github_urls() {
-        let expected = ("https://github.com/cooklang/recipes.git".to_owned(), "cooklang".to_owned(), "recipes".to_owned());
-        assert_eq!(normalized("https://github.com/cooklang/recipes"), expected);
-        assert_eq!(normalized("http://github.com/cooklang/recipes"), expected);
-        assert_eq!(normalized("github.com/cooklang/recipes"), expected);
-        assert_eq!(normalized("https://www.github.com/cooklang/recipes"), expected);
-    }
-
-    #[test]
-    fn accepts_git_suffixed_urls() {
-        let expected = ("https://github.com/cooklang/recipes.git".to_owned(), "cooklang".to_owned(), "recipes".to_owned());
-        assert_eq!(normalized("https://github.com/cooklang/recipes.git"), expected);
-        assert_eq!(normalized("https://github.com/cooklang/recipes.git/"), expected);
-        assert_eq!(normalized("cooklang/recipes.git"), expected);
-    }
-
-    #[test]
-    fn tolerates_surrounding_whitespace_and_trailing_slashes() {
-        assert_eq!(
-            normalized("  https://github.com/cooklang/recipes/  "),
-            ("https://github.com/cooklang/recipes.git".to_owned(), "cooklang".to_owned(), "recipes".to_owned())
-        );
-    }
-
-    #[test]
-    fn rejects_non_repository_input() {
-        assert!(normalize_github_url("").is_err());
-        assert!(normalize_github_url("cooklang").is_err());
-        assert!(normalize_github_url("cooklang/recipes/extra/path").is_err());
-        assert!(normalize_github_url("not a repository").is_err());
-        assert!(normalize_github_url("git@github.com:cooklang/recipes.git").is_err());
-    }
-}
+#[path = "repository_tests.rs"]
+mod tests;
 
 fn app_data_dir() -> Result<PathBuf, String> {
     let project = robius_directories::ProjectDirs::from("org", "cooklang", "Cooklang Client")
