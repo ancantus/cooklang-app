@@ -692,6 +692,9 @@ fn render_item_fragment(recipe: &Recipe, item: &Item) -> String {
 /// Docked strip of every active timer, shown while a recipe is open.
 #[component]
 fn TimerBar() -> Element {
+    // Components do not automatically rerender when their parent reads this
+    // global signal, so subscribe the dock directly to the countdown ticker.
+    let _tick = TIMER_TICK.read();
     let timers_snapshot = ACTIVE_TIMERS.read().clone();
     if timers_snapshot.is_empty() {
         return rsx! {};
