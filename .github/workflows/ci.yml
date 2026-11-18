@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - run: cargo test --no-default-features
+
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Android SDK packages
+        run: sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;25.2.9519653' 'cmake;3.22.1'
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --version 0.7.10 --locked
+      - name: Configure rustls verifier dependency for Gradle
+        run: |
+          mkdir -p "$HOME/.gradle/init.d"
+          cat > "$HOME/.gradle/init.d/cooklang-rustls-verifier.gradle" <<'EOF'
+          allprojects {
+              repositories {
+                  maven { url 'https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/' }
+              }
+          }
+          gradle.projectsEvaluated {
+              def app = rootProject.subprojects.find { it.name == 'app' }
+              if (app != null) {
+                  app.dependencies.add('implementation', 'org.rustls:rustls-platform-verifier:0.2.0')
+              }
+          }
+          EOF
+      - name: Build debug APK
+        run: dx bundle --android --package-types apk
