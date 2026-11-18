@@ -1,7 +1,5 @@
 // The repository logic lives in the library crate so its unit tests can run
 // on the host without the GUI dependency tree (see Cargo.toml features).
-use cooklang_client::repository;
-
 mod ui;
 
 fn main() {
