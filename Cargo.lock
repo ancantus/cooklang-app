@@ -594,6 +594,9 @@ dependencies = [
  "ndk-context",
  "robius-directories",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

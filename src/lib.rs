@@ -4,3 +4,4 @@
 //! without the GUI/webview dependency tree (`cargo test --no-default-features`).
 
 pub mod repository;
+pub mod timers;

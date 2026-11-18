@@ -142,7 +142,7 @@ fn normalize_github_url(input: &str) -> Result<GithubRepository, String> {
 #[path = "repository_tests.rs"]
 mod tests;
 
-fn app_data_dir() -> Result<PathBuf, String> {
+pub(crate) fn app_data_dir() -> Result<PathBuf, String> {
     let project = robius_directories::ProjectDirs::from("org", "cooklang", "Cooklang Client")
         .ok_or_else(|| "The app data directory is unavailable on this device.".to_owned())?;
     Ok(project.data_local_dir().to_owned())
