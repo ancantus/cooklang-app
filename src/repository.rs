@@ -287,10 +287,9 @@ fn collect_recipe_paths(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>)
             && path
                 .extension()
                 .is_some_and(|extension| extension == "cook")
+            && let Ok(relative_path) = path.strip_prefix(root)
         {
-            if let Ok(relative_path) = path.strip_prefix(root) {
-                paths.push(relative_path.to_owned());
-            }
+            paths.push(relative_path.to_owned());
         }
     }
     Ok(())
