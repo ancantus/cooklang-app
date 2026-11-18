@@ -6,7 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use cooklang::{CooklangParser, Converter, Extensions, Recipe, metadata::{CooklangValueExt, StdKey}};
+use cooklang::{
+    Converter, CooklangParser, Extensions, Recipe,
+    metadata::{CooklangValueExt, StdKey},
+};
 
 /// A Cooklang file found in a repository checkout.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,7 +52,11 @@ pub fn load_saved_collection() -> Result<Option<Collection>, String> {
         return Ok(None);
     }
     let recipes = read_recipes(&path).map_err(|error| error.to_string())?;
-    Ok(Some(Collection { url: repository.url, path, recipes }))
+    Ok(Some(Collection {
+        url: repository.url,
+        path,
+        recipes,
+    }))
 }
 
 /// Connect to a GitHub repository or refresh its existing checkout.
@@ -61,12 +68,17 @@ pub fn connect_or_refresh(input: &str) -> Result<Collection, String> {
     } else {
         fs::create_dir_all(destination.parent().expect("collection path has a parent"))
             .map_err(|error| error.to_string())?;
-        clone_github_repository(&repository.url, &destination, None).map_err(|error| error.to_string())?;
+        clone_github_repository(&repository.url, &destination, None)
+            .map_err(|error| error.to_string())?;
     }
 
     let recipes = read_recipes(&destination).map_err(|error| error.to_string())?;
     save_url(&repository.url)?;
-    Ok(Collection { url: repository.url, path: destination, recipes })
+    Ok(Collection {
+        url: repository.url,
+        path: destination,
+        recipes,
+    })
 }
 
 /// Remove a connected checkout and its saved repository selection.
@@ -110,10 +122,14 @@ fn normalize_github_url(input: &str) -> Result<GithubRepository, String> {
         !part.is_empty()
             && part != "."
             && part != ".."
-            && part.chars().all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
     };
     if parts.next().is_some() || !valid_segment(owner) || !valid_segment(name) {
-        return Err("Enter a GitHub repository as owner/repository or a github.com URL.".to_owned());
+        return Err(
+            "Enter a GitHub repository as owner/repository or a github.com URL.".to_owned(),
+        );
     }
     Ok(GithubRepository {
         url: format!("https://github.com/{owner}/{name}.git"),
@@ -176,10 +192,7 @@ pub fn clone_github_repository(
     destination: impl AsRef<Path>,
     user_access_token: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use gix::credentials::{
-        helper::Action,
-        protocol::Outcome as CredentialOutcome,
-    };
+    use gix::credentials::{helper::Action, protocol::Outcome as CredentialOutcome};
 
     let token = user_access_token.map(str::to_owned);
     let mut clone = gix::prepare_clone(url, destination)?
@@ -190,8 +203,7 @@ pub fn clone_github_repository(
             let token = token.clone();
             connection.set_credentials(move |action| match action {
                 Action::Get(context)
-                    if context.host.as_deref() == Some("github.com")
-                        && token.is_some() =>
+                    if context.host.as_deref() == Some("github.com") && token.is_some() =>
                 {
                     let token = token.as_ref().expect("checked above");
                     let next = context.into();
@@ -226,27 +238,35 @@ pub fn read_recipes(root: impl AsRef<Path>) -> io::Result<Vec<RecipeFile>> {
     paths.sort();
 
     let parser = CooklangParser::new(Extensions::empty(), Converter::default());
-    let mut recipes = paths.into_iter().map(|path| {
-        let source = fs::read_to_string(root.join(&path))?;
-        let parsed = parser.parse(&source);
-        let title = parsed
-            .output()
-            .and_then(|recipe| recipe.metadata.get(StdKey::Title))
-            .and_then(CooklangValueExt::as_str_like)
-            .map(|title| title.into_owned())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Untitled recipe")
-                    .to_owned()
-            });
-        let recipe = parsed
-            .into_result()
-            .map(|(recipe, _warnings)| recipe)
-            .map_err(|error| error.to_string());
+    let mut recipes = paths
+        .into_iter()
+        .map(|path| {
+            let source = fs::read_to_string(root.join(&path))?;
+            let parsed = parser.parse(&source);
+            let title = parsed
+                .output()
+                .and_then(|recipe| recipe.metadata.get(StdKey::Title))
+                .and_then(CooklangValueExt::as_str_like)
+                .map(|title| title.into_owned())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Untitled recipe")
+                        .to_owned()
+                });
+            let recipe = parsed
+                .into_result()
+                .map(|(recipe, _warnings)| recipe)
+                .map_err(|error| error.to_string());
 
-        Ok(RecipeFile { path, title, source, recipe })
-    }).collect::<io::Result<Vec<_>>>()?;
+            Ok(RecipeFile {
+                path,
+                title,
+                source,
+                recipe,
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     recipes.sort_by(|left, right| {
         left.title
             .to_lowercase()
@@ -263,7 +283,11 @@ fn collect_recipe_paths(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>)
         let path = entry.path();
         if file_type.is_dir() {
             collect_recipe_paths(root, &path, paths)?;
-        } else if file_type.is_file() && path.extension().is_some_and(|extension| extension == "cook") {
+        } else if file_type.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "cook")
+        {
             if let Ok(relative_path) = path.strip_prefix(root) {
                 paths.push(relative_path.to_owned());
             }
