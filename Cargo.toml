@@ -5,12 +5,28 @@ edition = "2024"
 license = "MIT"
 description = "Android client for Cooklang recipes"
 
+[features]
+default = ["app"]
+# The Dioxus app shell. Unit tests for the repository logic run with
+# `cargo test --no-default-features`, which skips the GUI/webview dependency
+# tree (its Linux host build needs system glib/gtk development headers).
+app = ["dep:dioxus", "dep:jni", "dep:ndk-context", "dep:rustls-platform-verifier"]
+
+[lib]
+name = "cooklang_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cooklang-client-android"
+path = "src/main.rs"
+required-features = ["app"]
+
 [dependencies]
 cooklang = { version = "0.19", default-features = false, features = ["aisle"] }
-dioxus = { version = "0.7", features = ["mobile"] }
+dioxus = { version = "0.7", features = ["mobile"], optional = true }
 futures-channel = "0.3"
 gix = { version = "0.90", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
-jni = "0.22"
-ndk-context = "0.1"
+jni = { version = "0.22", optional = true }
+ndk-context = { version = "0.1", optional = true }
 robius-directories = "6.0.1"
-rustls-platform-verifier = "=0.7.1"
+rustls-platform-verifier = { version = "=0.7.1", optional = true }

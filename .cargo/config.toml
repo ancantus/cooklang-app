@@ -1,17 +1,40 @@
 # Injected into wry's WryActivity.kt at build time (see wry build.rs:
 # WRY_WRYACTIVITY_CLASS_EXTENSION). The WebView teardown path that runs when
 # the activity finishes crashes with a FORTIFY "pthread_mutex_lock called on
-# a destroyed mutex" abort on Android 15, killing the app on the system BACK
-# key. An always-enabled back callback backgrounds the app instead of
-# finishing the activity; the in-app "‹ Back to recipes" button handles
-# navigation from the recipe detail screen. (onKeyDown and the common
-# lifecycle methods are already defined by wry's template, so hook into
-# onPostCreate instead.)
+# a destroyed mutex" abort, killing the app when the system BACK key finishes
+# the activity. So BACK never finishes the activity here:
+#  - While a recipe detail screen is open, BACK evaluates a JS snippet that
+#    clicks the in-app "‹ Back to recipes" button (id "recipe-back-button"),
+#    returning to the recipe list through Dioxus' own navigation.
+#  - Otherwise (recipe list or connect screen) BACK backgrounds the app with
+#    moveTaskToBack, which is the standard Android behavior and avoids the
+#    crash path entirely.
+# The extension is spliced into the WryActivity class body, so the template's
+# private mWebView field is directly accessible. Do not override template
+# members here (e.g. onWebViewCreate): an override in the same class is a
+# conflicting overload, not a subclass override.
+# (onKeyDown and the common lifecycle methods are already defined by wry's
+# template, so hook into onPostCreate instead.)
 [env]
 WRY_WRYACTIVITY_CLASS_EXTENSION = """
 private val backGuard = object : androidx.activity.OnBackPressedCallback(true) {
     override fun handleOnBackPressed() {
-        moveTaskToBack(true)
+        val webView = try {
+            mWebView
+        } catch (_: UninitializedPropertyAccessException) {
+            null
+        }
+        if (webView == null) {
+            moveTaskToBack(true)
+            return
+        }
+        webView.evaluateJavascript(
+            "(function(){var b=document.getElementById('recipe-back-button');if(b){b.click();return true;}return false;})()",
+        ) { clickedInApp ->
+            if (clickedInApp != "true") {
+                moveTaskToBack(true)
+            }
+        }
     }
 }
 
