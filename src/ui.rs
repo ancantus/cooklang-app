@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use cooklang::{Content, Converter, Item, Recipe, Step, metadata::StdKey};
+use cooklang::{Content, Converter, Item, Recipe, metadata::StdKey};
 use dioxus::prelude::*;
 
-use crate::repository::{self, Collection, RecipeFile};
-use crate::timers::{self, TimerEntry};
+use cooklang_client::repository::{Collection, RecipeFile};
+use cooklang_client::timers::TimerEntry;
+use cooklang_client::{repository, timers};
 
 #[derive(Default)]
 struct BrowserState {
@@ -68,6 +69,10 @@ fn persist_timers() {
     if let Err(error) = timers::save_timers(&snapshot) {
         eprintln!("Saving timers failed: {error}");
     }
+}
+
+fn set_timer_prompt(prompt: Option<TimerPrompt>) {
+    TIMER_PROMPT.with_mut(|current| *current = prompt);
 }
 
 /// Start (or restart) a timer with a fresh countdown of `total_secs`.
@@ -154,7 +159,7 @@ fn timer_cancel(id: String) {
 /// timer finishing (for the completion beep) without draining the battery.
 fn start_timer_ticker() {
     use_effect(move || {
-        spawn_forever(async move {
+        dioxus::core::spawn_forever(async move {
             let mut announced: HashSet<String> = HashSet::new();
             loop {
                 let now = timers::now_ms();
@@ -451,6 +456,11 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
     // to the half-second tick, keeping inline countdowns and chips live.
     let _tick = TIMER_TICK.read();
     let timers_snapshot = ACTIVE_TIMERS.read().clone();
+    let finished_timers = timers_snapshot
+        .iter()
+        .filter(|entry| entry.is_finished(timers::now_ms()))
+        .cloned()
+        .collect::<Vec<_>>();
     let recipe_path = recipe_file.path.display().to_string();
     let recipe_title = recipe_file.title.clone();
 
@@ -500,7 +510,7 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
             }
 
             // Finished timers announce themselves until they are dismissed.
-            for entry in timers_snapshot.iter().filter(|entry| entry.is_finished(timers::now_ms())) {
+            for entry in finished_timers {
                 div { class: "notice notice-done",
                     span { class: "done-bell", "⏰" }
                     div {
@@ -591,6 +601,7 @@ fn render_step_item(
             };
             let id = format!("{recipe_path}#{index}");
             let label = timer.name.clone().unwrap_or_else(|| "Timer".to_owned());
+            let recipe_title = recipe_title.to_owned();
             let authored_secs = timers::timer_duration_secs(timer.quantity.as_ref());
             let entry = timers_snapshot.iter().find(|entry| entry.id == id).cloned();
             let now = timers::now_ms();
@@ -618,10 +629,10 @@ fn render_step_item(
                         Some(entry) if entry.is_finished(timers::now_ms()) => timer_restart(id.clone()),
                         Some(_) => {}
                         None => match authored_secs {
-                            Some(secs) => timer_start(id.clone(), recipe_title.to_owned(), label.clone(), secs),
-                            None => TIMER_PROMPT.set(Some(TimerPrompt {
+                            Some(secs) => timer_start(id.clone(), recipe_title.clone(), label.clone(), secs),
+                            None => set_timer_prompt(Some(TimerPrompt {
                                 id: id.clone(),
-                                recipe_title: recipe_title.to_owned(),
+                                recipe_title: recipe_title.clone(),
                                 label: label.clone(),
                             })),
                         },
@@ -678,6 +689,10 @@ fn TimerBar() -> Element {
 #[component]
 fn TimerChip(entry: TimerEntry, now: u128) -> Element {
     let id = entry.id.clone();
+    let pause_id = id.clone();
+    let add_minute_id = id.clone();
+    let restart_id = id.clone();
+    let cancel_id = id;
     let finished = entry.is_finished(now);
     let paused = entry.is_paused();
     let time_text = if finished {
@@ -706,13 +721,13 @@ fn TimerChip(entry: TimerEntry, now: u128) -> Element {
                     button {
                         class: "chip-button",
                         title: if paused { "Resume" } else { "Pause" },
-                        onclick: move |_| timer_toggle_pause(id.clone()),
+                        onclick: move |_| timer_toggle_pause(pause_id.clone()),
                         if paused { "▶" } else { "⏸" }
                     }
                 }
-                button { class: "chip-button", title: "Add one minute", onclick: move |_| timer_add_minute(id.clone()), "+1′" }
-                button { class: "chip-button", title: "Restart", onclick: move |_| timer_restart(id.clone()), "↺" }
-                button { class: "chip-button", title: "Remove timer", onclick: move |_| timer_cancel(id.clone()), "✕" }
+                button { class: "chip-button", title: "Add one minute", onclick: move |_| timer_add_minute(add_minute_id.clone()), "+1′" }
+                button { class: "chip-button", title: "Restart", onclick: move |_| timer_restart(restart_id.clone()), "↺" }
+                button { class: "chip-button", title: "Remove timer", onclick: move |_| timer_cancel(cancel_id.clone()), "✕" }
             }
         }
     }
@@ -731,7 +746,7 @@ fn TimerPromptModal(prompt: TimerPrompt) -> Element {
         .filter(|secs| *secs > 0);
     rsx! {
         div { class: "timer-modal",
-            onclick: move |_| TIMER_PROMPT.set(None),
+            onclick: move |_| set_timer_prompt(None),
             div { class: "timer-modal-card",
                 onclick: move |event| event.stop_propagation(),
                 h3 { "Set “{prompt.label}”" }
@@ -749,7 +764,7 @@ fn TimerPromptModal(prompt: TimerPrompt) -> Element {
                     autofocus: true,
                 }
                 div { class: "timer-modal-actions",
-                    button { class: "quiet-button", onclick: move |_| TIMER_PROMPT.set(None), "Cancel" }
+                    button { class: "quiet-button", onclick: move |_| set_timer_prompt(None), "Cancel" }
                     button {
                         class: "primary-button",
                         disabled: entered.is_none(),
@@ -761,7 +776,7 @@ fn TimerPromptModal(prompt: TimerPrompt) -> Element {
                                     prompt.label.clone(),
                                     secs,
                                 );
-                                TIMER_PROMPT.set(None);
+                                set_timer_prompt(None);
                             }
                         },
                         "Start timer"
