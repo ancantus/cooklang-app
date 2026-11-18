@@ -227,6 +227,102 @@ button:disabled { cursor: default; opacity: .58; }
 .recipe-note p { margin: .2rem 0 0; color: #625b4d; font-size: .82rem; line-height: 1.5; }
 .source-fallback { overflow-x: auto; margin: 1rem; padding: 1rem; border-radius: .7rem; color: #45554b; background: #f3f5f1; font-size: .76rem; line-height: 1.5; white-space: pre-wrap; }
 
+/* Recipe timers */
+.inline-timer {
+    display: inline-flex;
+    min-height: 1.85rem;
+    align-items: center;
+    gap: .3rem;
+    margin: 0 .12rem;
+    padding: .12rem .58rem;
+    border: 1px solid #dce7dc;
+    border-radius: 99px;
+    color: var(--green-dark);
+    background: #eef5ed;
+    cursor: pointer;
+    font-size: .78rem;
+    font-weight: 700;
+    line-height: 1.25;
+    vertical-align: .08rem;
+}
+.inline-timer:hover { border-color: #b9d0bd; background: #e4efe3; }
+.inline-timer-idle { color: #536c5a; background: #f0f4ed; }
+.inline-timer-running { border-color: #b6d1bb; color: #1e583b; background: #e6f2e6; font-variant-numeric: tabular-nums; }
+.inline-timer-paused { border-color: #e5d4a8; color: #765f2e; background: #fbf3df; font-variant-numeric: tabular-nums; }
+.inline-timer-done { border-color: #e7c9aa; color: #8b4e2b; background: #fff0df; }
+
+.notice-done { align-items: center; color: #754c2b; background: #fff3e4; }
+.notice-done > div { flex: 1; }
+.done-bell { font-size: 1.2rem; }
+.notice-done-dismiss { min-height: 1.9rem; margin-top: .25rem; padding: 0 .45rem; font-size: .72rem; }
+
+.timer-bar {
+    position: fixed;
+    z-index: 5;
+    right: max(.65rem, env(safe-area-inset-right));
+    bottom: max(.65rem, env(safe-area-inset-bottom));
+    left: max(.65rem, env(safe-area-inset-left));
+    display: flex;
+    max-width: 44rem;
+    gap: .55rem;
+    margin: 0 auto;
+    padding: .5rem;
+    overflow-x: auto;
+    border: 1px solid rgba(214, 222, 211, .92);
+    border-radius: 1rem;
+    background: rgba(255, 254, 250, .96);
+    box-shadow: 0 8px 30px rgba(34, 48, 38, .18);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    scrollbar-width: thin;
+}
+.timer-chip {
+    display: flex;
+    min-width: 15rem;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: .65rem;
+    padding: .45rem .55rem .45rem .75rem;
+    border: 1px solid #e3e9e0;
+    border-radius: .75rem;
+    background: #f8faf6;
+}
+.timer-chip-main { display: grid; min-width: 0; flex: 1; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; column-gap: .45rem; }
+.timer-chip-time { color: var(--green-dark); font-size: .9rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timer-chip-label { overflow: hidden; color: #34463a; font-size: .76rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.timer-chip-sub { overflow: hidden; grid-column: 1 / -1; color: #89928b; font-size: .65rem; text-overflow: ellipsis; white-space: nowrap; }
+.timer-chip-actions { display: flex; flex: 0 0 auto; gap: .16rem; }
+.chip-button { display: inline-grid; min-width: 1.9rem; min-height: 1.9rem; place-items: center; padding: 0 .25rem; border: 0; border-radius: .5rem; color: #5e7063; background: #edf2eb; cursor: pointer; font-size: .76rem; font-weight: 750; }
+.chip-button:hover { color: var(--green-dark); background: #dfeade; }
+.chip-done { border-color: #efd8bd; background: #fff6eb; }
+.chip-done .timer-chip-time { color: #9a592f; }
+.chip-paused { border-color: #eadfbd; background: #fcf8ec; }
+.chip-paused .timer-chip-time { color: #806a35; }
+
+.timer-modal {
+    position: fixed;
+    z-index: 10;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: rgba(27, 39, 31, .42);
+}
+.timer-modal-card { width: min(100%, 25rem); padding: 1.35rem; border: 1px solid #e2e8df; border-radius: 1.1rem; background: var(--paper); box-shadow: 0 20px 65px rgba(18, 30, 21, .25); }
+.timer-modal-card h3 { margin: 0; color: var(--green-dark); font-family: Georgia, serif; font-size: 1.45rem; font-weight: 600; }
+.timer-modal-hint { margin: .45rem 0 1rem; color: var(--muted); font-size: .84rem; line-height: 1.5; }
+.timer-modal-card input { width: 100%; min-height: 3rem; padding: .65rem .75rem; border: 1px solid #dfe4dc; border-radius: .75rem; color: var(--ink); background: #fff; }
+.timer-modal-actions { display: flex; justify-content: flex-end; gap: .45rem; margin-top: 1rem; }
+.timer-modal-actions .primary-button { min-width: 7rem; margin-top: 0; padding: 0 .9rem; }
+
+/* Keep recipe content reachable above the docked timers. */
+.detail-page { margin-bottom: 5.8rem; }
+@media (max-width: 420px) {
+    .timer-chip { min-width: 13.5rem; }
+    .timer-chip-sub { max-width: 7rem; }
+    .chip-button { min-width: 1.75rem; min-height: 1.75rem; }
+}
+
 @media (min-width: 600px) {
     .app-shell { padding-right: 1.5rem; padding-left: 1.5rem; }
     .welcome-card { padding: 2rem; }

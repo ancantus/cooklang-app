@@ -1,9 +1,12 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use cooklang::{Content, Converter, Item, Recipe, Step, metadata::StdKey};
 use dioxus::prelude::*;
 
 use crate::repository::{self, Collection, RecipeFile};
+use crate::timers::{self, TimerEntry};
 
 #[derive(Default)]
 struct BrowserState {
@@ -34,10 +37,185 @@ impl BrowserState {
     }
 }
 
+// --- Recipe timers -----------------------------------------------------------
+//
+// Timers are global so they keep counting across screens and outlive the
+// recipe they were started from. The tick signal is bumped while any timer is
+// counting down; components read it to keep their countdowns live. All state
+// is wall-clock based, so backgrounding the app and coming back later leaves
+// every countdown correct.
+
+/// Timers started from any recipe, persisted so an app kill loses nothing.
+static ACTIVE_TIMERS: GlobalSignal<Vec<TimerEntry>> = Signal::global(load_active_timers);
+/// Bumped while timers are counting down to re-render live countdowns.
+static TIMER_TICK: GlobalSignal<u64> = Signal::global(|| 0u64);
+/// A timer tapped in a step that has no authored (or usable) duration.
+static TIMER_PROMPT: GlobalSignal<Option<TimerPrompt>> = Signal::global(|| None);
+
+#[derive(Clone, PartialEq)]
+struct TimerPrompt {
+    id: String,
+    recipe_title: String,
+    label: String,
+}
+
+fn load_active_timers() -> Vec<TimerEntry> {
+    timers::load_timers()
+}
+
+fn persist_timers() {
+    let snapshot = ACTIVE_TIMERS.read().clone();
+    if let Err(error) = timers::save_timers(&snapshot) {
+        eprintln!("Saving timers failed: {error}");
+    }
+}
+
+/// Start (or restart) a timer with a fresh countdown of `total_secs`.
+fn timer_start(id: String, recipe_title: String, label: String, total_secs: u64) {
+    let now = timers::now_ms();
+    ACTIVE_TIMERS.with_mut(|list| {
+        if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+            *entry = TimerEntry::start_at(&id, &recipe_title, &label, total_secs, now);
+        } else {
+            list.push(TimerEntry::start_at(
+                &id,
+                &recipe_title,
+                &label,
+                total_secs,
+                now,
+            ));
+        }
+    });
+    persist_timers();
+}
+
+/// Pause a counting timer or resume a paused one.
+fn timer_toggle_pause(id: String) {
+    let now = timers::now_ms();
+    ACTIVE_TIMERS.with_mut(|list| {
+        if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+            match entry.deadline_ms {
+                Some(deadline) if deadline > now => {
+                    entry.paused_remaining_secs = entry.remaining_secs(now);
+                    entry.deadline_ms = None;
+                }
+                // Finished timers stay finished; pausing would hide that.
+                Some(_) => {}
+                None => {
+                    if entry.paused_remaining_secs > 0 {
+                        entry.deadline_ms =
+                            Some(now + u128::from(entry.paused_remaining_secs) * 1000);
+                        entry.paused_remaining_secs = 0;
+                    }
+                }
+            }
+        }
+    });
+    persist_timers();
+}
+
+/// Give a timer one more minute: extends a counting countdown, wakes a paused
+/// one by a minute, or restarts a finished one for sixty seconds.
+fn timer_add_minute(id: String) {
+    let now = timers::now_ms();
+    ACTIVE_TIMERS.with_mut(|list| {
+        if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+            match entry.deadline_ms {
+                Some(deadline) => entry.deadline_ms = Some(deadline.max(now) + 60_000),
+                None => entry.paused_remaining_secs += 60,
+            }
+        }
+    });
+    persist_timers();
+}
+
+/// Reset a timer to its full authored duration and start it again.
+fn timer_restart(id: String) {
+    let now = timers::now_ms();
+    ACTIVE_TIMERS.with_mut(|list| {
+        if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+            entry.deadline_ms = Some(now + u128::from(entry.total_secs) * 1000);
+            entry.paused_remaining_secs = 0;
+        }
+    });
+    persist_timers();
+}
+
+/// Remove a timer entirely.
+fn timer_cancel(id: String) {
+    ACTIVE_TIMERS.with_mut(|list| list.retain(|entry| entry.id != id));
+    persist_timers();
+}
+
+/// Keep countdowns ticking and announce timers that finish while open.
+///
+/// The app is suspended between ticks, so polling at 500 ms only matters while
+/// a countdown is live; otherwise the loop idles at 2 s and still catches a
+/// timer finishing (for the completion beep) without draining the battery.
+fn start_timer_ticker() {
+    use_effect(move || {
+        spawn_forever(async move {
+            let mut announced: HashSet<String> = HashSet::new();
+            loop {
+                let now = timers::now_ms();
+                let finished: HashSet<String> = ACTIVE_TIMERS
+                    .read()
+                    .iter()
+                    .filter(|entry| entry.is_finished(now))
+                    .map(|entry| entry.id.clone())
+                    .collect();
+                if finished.iter().any(|id| !announced.contains(id)) {
+                    announce_finished_timer();
+                }
+                announced = finished;
+                let counting = ACTIVE_TIMERS
+                    .read()
+                    .iter()
+                    .any(|entry| entry.is_counting(now));
+                if counting {
+                    *TIMER_TICK.write() += 1;
+                }
+                tokio::time::sleep(if counting {
+                    Duration::from_millis(500)
+                } else {
+                    Duration::from_secs(2)
+                })
+                .await;
+            }
+        });
+    });
+}
+
+/// Best-effort completion beep through the WebView; silent when blocked.
+fn announce_finished_timer() {
+    dioxus::document::eval(
+        r#"(function () {
+            try {
+                var Context = window.AudioContext || window.webkitAudioContext;
+                if (!Context) { return; }
+                var context = new Context();
+                var oscillator = context.createOscillator();
+                var gain = context.createGain();
+                oscillator.type = "sine";
+                oscillator.frequency.value = 880;
+                gain.gain.value = 0.25;
+                oscillator.connect(gain);
+                gain.connect(context.destination);
+                oscillator.start();
+                setTimeout(function () {
+                    try { oscillator.stop(); context.close(); } catch (error) {}
+                }, 700);
+            } catch (error) {}
+        })();"#,
+    );
+}
+
 #[component]
 pub fn App() -> Element {
     let mut state = use_signal(BrowserState::load);
     let snapshot = state.read();
+    start_timer_ticker();
+    let prompt = TIMER_PROMPT.read().clone();
 
     rsx! {
         style { {include_str!("../assets/main.css")} }
@@ -83,6 +261,10 @@ pub fn App() -> Element {
                     on_connect: move |_| connect_collection(state),
                 }
             }
+        }
+
+        if let Some(prompt) = prompt {
+            TimerPromptModal { key: "{prompt.id}", prompt }
         }
     }
 }
@@ -265,6 +447,13 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
     };
 
     let parsed = recipe_file.recipe.as_ref().ok();
+    // Reading both signals subscribes the detail view to timer mutations and
+    // to the half-second tick, keeping inline countdowns and chips live.
+    let _tick = TIMER_TICK.read();
+    let timers_snapshot = ACTIVE_TIMERS.read().clone();
+    let recipe_path = recipe_file.path.display().to_string();
+    let recipe_title = recipe_file.title.clone();
+
     let (tags, description, servings, prep_time, cook_time, total_time) = parsed
         .map(|recipe| {
             let converter = Converter::default();
@@ -310,6 +499,17 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
                 }
             }
 
+            // Finished timers announce themselves until they are dismissed.
+            for entry in timers_snapshot.iter().filter(|entry| entry.is_finished(timers::now_ms())) {
+                div { class: "notice notice-done",
+                    span { class: "done-bell", "⏰" }
+                    div {
+                        p { "“{entry.label}” ({entry.recipe_title}) finished." }
+                        button { class: "quiet-button notice-done-dismiss", onclick: move |_| timer_cancel(entry.id.clone()), "Dismiss" }
+                    }
+                }
+            }
+
             if let Some(parsed) = parsed {
                 if !parsed.ingredients.is_empty() {
                     section { class: "detail-section ingredients-section",
@@ -334,7 +534,11 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
                         ol { class: "method-steps",
                             for content in section.content.iter() {
                                 if let Content::Step(step) = content {
-                                    li { class: "method-step", "{render_step(parsed, step)}" }
+                                    li { class: "method-step",
+                                        for item in step.items.iter() {
+                                            {render_step_item(parsed, &recipe_path, &recipe_title, item, &timers_snapshot)}
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -362,46 +566,210 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
                 pre { class: "source-fallback", "{recipe_file.source}" }
             }
         }
+
+        TimerBar {}
     }
 }
 
-fn render_step(recipe: &Recipe, step: &Step) -> String {
-    use std::fmt::Write as _;
-    let mut text = String::new();
-    for item in &step.items {
-        let fragment = match item {
-            Item::Text { value } => value.clone(),
-            Item::Ingredient { index } => recipe
-                .ingredients
-                .get(*index)
-                .map(|ingredient| ingredient.display_name().into_owned())
-                .unwrap_or_default(),
-            Item::Cookware { index } => recipe
-                .cookware
-                .get(*index)
-                .map(|cookware| cookware.display_name().to_owned())
-                .unwrap_or_default(),
-            Item::Timer { index } => recipe
-                .timers
-                .get(*index)
-                .map(|timer| {
-                    let label = timer.name.as_deref().unwrap_or("Timer");
-                    timer
-                        .quantity
-                        .as_ref()
-                        .map(|quantity| format!("⏱ {label}: {quantity}"))
-                        .unwrap_or_else(|| format!("⏱ {label}"))
-                })
-                .unwrap_or_default(),
-            Item::InlineQuantity { index } => recipe
-                .inline_quantities
-                .get(*index)
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-        };
-        let _ = write!(text, "{fragment}");
+/// Render one step item as text or, for timers, as a tappable pill.
+///
+/// Tapping starts the timer with its authored duration; a timer without a
+/// usable duration opens the duration prompt instead. While a timer is
+/// counting or paused, tapping does nothing — its controls live on the chip in
+/// the timer bar. Tapping a finished timer restarts it.
+fn render_step_item(
+    recipe: &Recipe,
+    recipe_path: &str,
+    recipe_title: &str,
+    item: &Item,
+    timers_snapshot: &[TimerEntry],
+) -> Element {
+    match item {
+        Item::Timer { index } => {
+            let Some(timer) = recipe.timers.get(*index) else {
+                return rsx! {};
+            };
+            let id = format!("{recipe_path}#{index}");
+            let label = timer.name.clone().unwrap_or_else(|| "Timer".to_owned());
+            let authored_secs = timers::timer_duration_secs(timer.quantity.as_ref());
+            let entry = timers_snapshot.iter().find(|entry| entry.id == id).cloned();
+            let now = timers::now_ms();
+            let (display, state_class) = match &entry {
+                Some(entry) if entry.is_finished(now) => ("done".to_owned(), "inline-timer-done"),
+                Some(entry) if entry.is_paused() => (
+                    timers::format_countdown(entry.paused_remaining_secs),
+                    "inline-timer-paused",
+                ),
+                Some(entry) => (
+                    timers::format_countdown(entry.remaining_secs(now)),
+                    "inline-timer-running",
+                ),
+                None => (
+                    authored_secs
+                        .map(timers::format_countdown)
+                        .unwrap_or_else(|| "set time".to_owned()),
+                    "inline-timer-idle",
+                ),
+            };
+            rsx! {
+                button {
+                    class: "inline-timer {state_class}",
+                    onclick: move |_| match &entry {
+                        Some(entry) if entry.is_finished(timers::now_ms()) => timer_restart(id.clone()),
+                        Some(_) => {}
+                        None => match authored_secs {
+                            Some(secs) => timer_start(id.clone(), recipe_title.to_owned(), label.clone(), secs),
+                            None => TIMER_PROMPT.set(Some(TimerPrompt {
+                                id: id.clone(),
+                                recipe_title: recipe_title.to_owned(),
+                                label: label.clone(),
+                            })),
+                        },
+                    },
+                    "⏱ {label} · {display}"
+                }
+            }
+        }
+        other => rsx! { "{render_item_fragment(recipe, other)}" },
     }
-    text
+}
+
+/// Plain-text fragment for every non-timer step item.
+fn render_item_fragment(recipe: &Recipe, item: &Item) -> String {
+    match item {
+        Item::Text { value } => value.clone(),
+        Item::Ingredient { index } => recipe
+            .ingredients
+            .get(*index)
+            .map(|ingredient| ingredient.display_name().into_owned())
+            .unwrap_or_default(),
+        Item::Cookware { index } => recipe
+            .cookware
+            .get(*index)
+            .map(|cookware| cookware.display_name().to_owned())
+            .unwrap_or_default(),
+        Item::InlineQuantity { index } => recipe
+            .inline_quantities
+            .get(*index)
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        Item::Timer { .. } => String::new(),
+    }
+}
+
+/// Docked strip of every active timer, shown while a recipe is open.
+#[component]
+fn TimerBar() -> Element {
+    let timers_snapshot = ACTIVE_TIMERS.read().clone();
+    if timers_snapshot.is_empty() {
+        return rsx! {};
+    }
+    let now = timers::now_ms();
+    rsx! {
+        div { class: "timer-bar", id: "timer-bar",
+            for entry in timers_snapshot {
+                TimerChip { key: "{entry.id}", entry, now }
+            }
+        }
+    }
+}
+
+/// One timer chip with its countdown and full controls.
+#[component]
+fn TimerChip(entry: TimerEntry, now: u128) -> Element {
+    let id = entry.id.clone();
+    let finished = entry.is_finished(now);
+    let paused = entry.is_paused();
+    let time_text = if finished {
+        "✓ done".to_owned()
+    } else if paused {
+        timers::format_countdown(entry.paused_remaining_secs)
+    } else {
+        timers::format_countdown(entry.remaining_secs(now))
+    };
+    let state_class = if finished {
+        "chip-done"
+    } else if paused {
+        "chip-paused"
+    } else {
+        "chip-running"
+    };
+    rsx! {
+        div { class: "timer-chip {state_class}",
+            div { class: "timer-chip-main",
+                span { class: "timer-chip-time", "{time_text}" }
+                span { class: "timer-chip-label", "{entry.label}" }
+                span { class: "timer-chip-sub", "{entry.recipe_title}" }
+            }
+            div { class: "timer-chip-actions",
+                if !finished {
+                    button {
+                        class: "chip-button",
+                        title: if paused { "Resume" } else { "Pause" },
+                        onclick: move |_| timer_toggle_pause(id.clone()),
+                        if paused { "▶" } else { "⏸" }
+                    }
+                }
+                button { class: "chip-button", title: "Add one minute", onclick: move |_| timer_add_minute(id.clone()), "+1′" }
+                button { class: "chip-button", title: "Restart", onclick: move |_| timer_restart(id.clone()), "↺" }
+                button { class: "chip-button", title: "Remove timer", onclick: move |_| timer_cancel(id.clone()), "✕" }
+            }
+        }
+    }
+}
+
+/// Ask for a duration when a tapped timer has none the app can use.
+#[component]
+fn TimerPromptModal(prompt: TimerPrompt) -> Element {
+    let mut minutes_input = use_signal(String::new);
+    let entered = minutes_input
+        .read()
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .map(|minutes| (minutes * 60.0).round() as u64)
+        .filter(|secs| *secs > 0);
+    rsx! {
+        div { class: "timer-modal",
+            onclick: move |_| TIMER_PROMPT.set(None),
+            div { class: "timer-modal-card",
+                onclick: move |event| event.stop_propagation(),
+                h3 { "Set “{prompt.label}”" }
+                p { class: "timer-modal-hint",
+                    "This timer has no duration in the recipe. How long should it run?"
+                }
+                input {
+                    r#type: "number",
+                    inputmode: "decimal",
+                    min: "0",
+                    step: "any",
+                    placeholder: "Minutes, e.g. 10",
+                    value: minutes_input.read().clone(),
+                    oninput: move |event| minutes_input.set(event.value()),
+                    autofocus: true,
+                }
+                div { class: "timer-modal-actions",
+                    button { class: "quiet-button", onclick: move |_| TIMER_PROMPT.set(None), "Cancel" }
+                    button {
+                        class: "primary-button",
+                        disabled: entered.is_none(),
+                        onclick: move |_| {
+                            if let Some(secs) = entered {
+                                timer_start(
+                                    prompt.id.clone(),
+                                    prompt.recipe_title.clone(),
+                                    prompt.label.clone(),
+                                    secs,
+                                );
+                                TIMER_PROMPT.set(None);
+                            }
+                        },
+                        "Start timer"
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn connect_collection(state: Signal<BrowserState>) {

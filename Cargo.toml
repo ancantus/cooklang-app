@@ -10,7 +10,8 @@ default = ["app"]
 # The Dioxus app shell. Unit tests for the repository logic run with
 # `cargo test --no-default-features`, which skips the GUI/webview dependency
 # tree (its Linux host build needs system glib/gtk development headers).
-app = ["dep:dioxus", "dep:jni", "dep:ndk-context", "dep:rustls-platform-verifier"]
+# `tokio` (time only) powers the timer ticker inside the Dioxus runtime.
+app = ["dep:dioxus", "dep:jni", "dep:ndk-context", "dep:rustls-platform-verifier", "dep:tokio"]
 
 [lib]
 name = "cooklang_client"
@@ -30,3 +31,6 @@ jni = { version = "0.22", optional = true }
 ndk-context = { version = "0.1", optional = true }
 robius-directories = "6.0.1"
 rustls-platform-verifier = { version = "=0.7.1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
