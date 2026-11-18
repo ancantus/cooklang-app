@@ -37,7 +37,7 @@ jobs:
           packages: ''
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-linux-android
+          targets: aarch64-linux-android
       - uses: Swatinem/rust-cache@v2
       - name: Install Android SDK packages
         run: sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;25.2.9519653' 'cmake;3.22.1'
@@ -60,7 +60,7 @@ jobs:
           }
           EOF
       - name: Build release APK
-        run: dx bundle --android --release --package-types apk
+        run: dx bundle --android --target aarch64-linux-android --release --package-types apk
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
