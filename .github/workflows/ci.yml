@@ -59,5 +59,11 @@ jobs:
               }
           }
           EOF
-      - name: Build debug APK
-        run: dx bundle --android --package-types apk
+      - name: Build release APK
+        run: dx bundle --android --release --package-types apk
+      - name: Upload release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cooklang-client-android-release-apk
+          path: target/dx/cooklang-client-android/release/android/app/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 1
