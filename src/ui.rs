@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use dioxus::prelude::*;
 use cooklang::{Content, Converter, Item, Recipe, Step, metadata::StdKey};
+use dioxus::prelude::*;
 
 use crate::repository::{self, Collection, RecipeFile};
 
@@ -133,14 +133,26 @@ fn CollectionBrowser(
     on_select: EventHandler<PathBuf>,
 ) -> Element {
     let query = search.trim().to_lowercase();
-    let recipes = collection.recipes.iter().filter(|recipe| {
-        query.is_empty()
-            || recipe.title.to_lowercase().contains(&query)
-                            || recipe_tags(recipe).as_ref().is_some_and(|tags| tags.iter().any(|tag| tag.to_lowercase().contains(&query)))
-    }).map(|recipe| {
-        let duplicate_title = collection.recipes.iter().filter(|candidate| candidate.title.eq_ignore_ascii_case(&recipe.title)).count() > 1;
-        (recipe.clone(), duplicate_title, recipe.path.clone())
-    }).collect::<Vec<_>>();
+    let recipes = collection
+        .recipes
+        .iter()
+        .filter(|recipe| {
+            query.is_empty()
+                || recipe.title.to_lowercase().contains(&query)
+                || recipe_tags(recipe)
+                    .as_ref()
+                    .is_some_and(|tags| tags.iter().any(|tag| tag.to_lowercase().contains(&query)))
+        })
+        .map(|recipe| {
+            let duplicate_title = collection
+                .recipes
+                .iter()
+                .filter(|candidate| candidate.title.eq_ignore_ascii_case(&recipe.title))
+                .count()
+                > 1;
+            (recipe.clone(), duplicate_title, recipe.path.clone())
+        })
+        .collect::<Vec<_>>();
 
     rsx! {
         section { class: "collection-heading",
@@ -204,7 +216,11 @@ fn CollectionBrowser(
 }
 
 #[component]
-fn RecipeRow(recipe: RecipeFile, duplicate_title: bool, onclick: EventHandler<MouseEvent>) -> Element {
+fn RecipeRow(
+    recipe: RecipeFile,
+    duplicate_title: bool,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
     let tags = recipe_tags(&recipe);
     let time = recipe_time(&recipe);
     rsx! {
@@ -249,17 +265,27 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
     };
 
     let parsed = recipe_file.recipe.as_ref().ok();
-    let (tags, description, servings, prep_time, cook_time, total_time) = parsed.map(|recipe| {
-        let converter = Converter::default();
-        (
-            recipe.metadata.tags().map(|tags| tags.into_iter().map(|tag| tag.into_owned()).collect::<Vec<_>>()),
-            recipe.metadata.description().map(str::to_owned),
-            recipe.metadata.servings().map(|value| value.to_string()),
-            recipe.metadata.get(StdKey::PrepTime).and_then(|value| cooklang::metadata::CooklangValueExt::as_minutes(value, &converter)),
-            recipe.metadata.get(StdKey::CookTime).and_then(|value| cooklang::metadata::CooklangValueExt::as_minutes(value, &converter)),
-            recipe.metadata.time(&converter).map(|value| value.total()),
-        )
-    }).unwrap_or_default();
+    let (tags, description, servings, prep_time, cook_time, total_time) = parsed
+        .map(|recipe| {
+            let converter = Converter::default();
+            (
+                recipe.metadata.tags().map(|tags| {
+                    tags.into_iter()
+                        .map(|tag| tag.into_owned())
+                        .collect::<Vec<_>>()
+                }),
+                recipe.metadata.description().map(str::to_owned),
+                recipe.metadata.servings().map(|value| value.to_string()),
+                recipe.metadata.get(StdKey::PrepTime).and_then(|value| {
+                    cooklang::metadata::CooklangValueExt::as_minutes(value, &converter)
+                }),
+                recipe.metadata.get(StdKey::CookTime).and_then(|value| {
+                    cooklang::metadata::CooklangValueExt::as_minutes(value, &converter)
+                }),
+                recipe.metadata.time(&converter).map(|value| value.total()),
+            )
+        })
+        .unwrap_or_default();
 
     rsx! {
         button { id: "recipe-back-button", class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
@@ -345,16 +371,33 @@ fn render_step(recipe: &Recipe, step: &Step) -> String {
     for item in &step.items {
         let fragment = match item {
             Item::Text { value } => value.clone(),
-            Item::Ingredient { index } => recipe.ingredients.get(*index)
-                .map(|ingredient| ingredient.display_name().into_owned()).unwrap_or_default(),
-            Item::Cookware { index } => recipe.cookware.get(*index)
-                .map(|cookware| cookware.display_name().to_owned()).unwrap_or_default(),
-            Item::Timer { index } => recipe.timers.get(*index).map(|timer| {
-                let label = timer.name.as_deref().unwrap_or("Timer");
-                timer.quantity.as_ref().map(|quantity| format!("⏱ {label}: {quantity}")).unwrap_or_else(|| format!("⏱ {label}"))
-            }).unwrap_or_default(),
-            Item::InlineQuantity { index } => recipe.inline_quantities.get(*index)
-                .map(ToString::to_string).unwrap_or_default(),
+            Item::Ingredient { index } => recipe
+                .ingredients
+                .get(*index)
+                .map(|ingredient| ingredient.display_name().into_owned())
+                .unwrap_or_default(),
+            Item::Cookware { index } => recipe
+                .cookware
+                .get(*index)
+                .map(|cookware| cookware.display_name().to_owned())
+                .unwrap_or_default(),
+            Item::Timer { index } => recipe
+                .timers
+                .get(*index)
+                .map(|timer| {
+                    let label = timer.name.as_deref().unwrap_or("Timer");
+                    timer
+                        .quantity
+                        .as_ref()
+                        .map(|quantity| format!("⏱ {label}: {quantity}"))
+                        .unwrap_or_else(|| format!("⏱ {label}"))
+                })
+                .unwrap_or_default(),
+            Item::InlineQuantity { index } => recipe
+                .inline_quantities
+                .get(*index)
+                .map(ToString::to_string)
+                .unwrap_or_default(),
         };
         let _ = write!(text, "{fragment}");
     }
@@ -367,7 +410,12 @@ fn connect_collection(state: Signal<BrowserState>) {
 }
 
 fn refresh_collection(state: Signal<BrowserState>) {
-    let Some(url) = state.read().collection.as_ref().map(|collection| collection.url.clone()) else {
+    let Some(url) = state
+        .read()
+        .collection
+        .as_ref()
+        .map(|collection| collection.url.clone())
+    else {
         return;
     };
     run_collection_operation(state, move || repository::connect_or_refresh(&url));
@@ -382,7 +430,9 @@ fn run_collection_operation(
         state.error = None;
     });
     let (sender, receiver) = futures_channel::oneshot::channel();
-    std::thread::spawn(move || { let _ = sender.send(operation()); });
+    std::thread::spawn(move || {
+        let _ = sender.send(operation());
+    });
     spawn(async move {
         match receiver.await {
             Ok(Ok(collection)) => state.with_mut(|state| {
@@ -408,12 +458,22 @@ fn run_collection_operation(
 }
 
 fn disconnect_collection(mut state: Signal<BrowserState>) {
-    let Some(url) = state.read().collection.as_ref().map(|collection| collection.url.clone()) else {
+    let Some(url) = state
+        .read()
+        .collection
+        .as_ref()
+        .map(|collection| collection.url.clone())
+    else {
         return;
     };
-    state.with_mut(|state| { state.loading = true; state.error = None; });
+    state.with_mut(|state| {
+        state.loading = true;
+        state.error = None;
+    });
     let (sender, receiver) = futures_channel::oneshot::channel();
-    std::thread::spawn(move || { let _ = sender.send(repository::disconnect(&url)); });
+    std::thread::spawn(move || {
+        let _ = sender.send(repository::disconnect(&url));
+    });
     spawn(async move {
         match receiver.await {
             Ok(Ok(())) => state.set(BrowserState::default()),
@@ -430,9 +490,21 @@ fn disconnect_collection(mut state: Signal<BrowserState>) {
 }
 
 fn recipe_tags(recipe: &RecipeFile) -> Option<Vec<String>> {
-    recipe.recipe.as_ref().ok()?.metadata.tags().map(|tags| tags.into_iter().map(|tag| tag.into_owned()).collect())
+    recipe
+        .recipe
+        .as_ref()
+        .ok()?
+        .metadata
+        .tags()
+        .map(|tags| tags.into_iter().map(|tag| tag.into_owned()).collect())
 }
 
 fn recipe_time(recipe: &RecipeFile) -> Option<u32> {
-    recipe.recipe.as_ref().ok()?.metadata.time(&cooklang::Converter::default()).map(|time| time.total())
+    recipe
+        .recipe
+        .as_ref()
+        .ok()?
+        .metadata
+        .time(&cooklang::Converter::default())
+        .map(|time| time.total())
 }

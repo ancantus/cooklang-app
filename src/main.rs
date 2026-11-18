@@ -18,7 +18,7 @@ fn main() {
 /// before the first HTTPS request, so do it once at startup.
 #[cfg(target_os = "android")]
 fn init_rustls_platform_verifier() {
-    use jni::{objects::JObject, JavaVM};
+    use jni::{JavaVM, objects::JObject};
 
     let android = ndk_context::android_context();
 
@@ -27,7 +27,8 @@ fn init_rustls_platform_verifier() {
     let result: Result<(), jni::errors::Error> = vm.attach_current_thread(|env| {
         // The context pointer from the Android glue outlives this scope; the
         // verifier stores its own global reference before returning.
-        let context = unsafe { JObject::from_raw(env, android.context().cast::<jni::sys::_jobject>()) };
+        let context =
+            unsafe { JObject::from_raw(env, android.context().cast::<jni::sys::_jobject>()) };
         rustls_platform_verifier::android::init_with_env(env, context)?;
         Ok(())
     });
