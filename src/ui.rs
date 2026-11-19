@@ -1,12 +1,313 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use cooklang::{Content, Converter, Item, Recipe, metadata::StdKey};
+use cooklang::{Content, Converter, Item, Quantity, Recipe, metadata::StdKey};
 use dioxus::prelude::*;
 
+use cooklang_client::editing::{format_minutes, parse_value};
 use cooklang_client::repository::{Collection, RecipeFile};
 use cooklang_client::timers::TimerEntry;
 use cooklang_client::{repository, timers};
+
+/// One field in the recipe detail view that supports inline editing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditTarget {
+    /// An amount in the ingredient list, by index into `Recipe::ingredients`.
+    Ingredient(usize),
+    /// A duration shown in a method step, by index into `Recipe::timers`.
+    Timer(usize),
+}
+
+/// How long a press must be held before an inline editor opens.
+const LONG_PRESS_MS: u64 = 450;
+
+/// The field a press is currently arming, plus the press serial that cancels it.
+///
+/// A press starts a delayed task; the task only opens an editor when this still
+/// holds the same serial. Lifting the finger clears it, so short taps stay short.
+static LONG_PRESS: GlobalSignal<Option<(EditTarget, u64)>> = Signal::global(|| None);
+/// Monotonic serial for the most recent press; prevents stale timers from firing.
+static LONG_PRESS_SERIAL: GlobalSignal<u64> = Signal::global(|| 0);
+
+/// In-memory edits for the recipe that is currently open.
+///
+/// The first release remains read-only on disk, so edits live here until the
+/// recipe is closed and are never written back to the repository. Keeping the
+/// authored values alongside the overrides lets a field return to its original
+/// value without consulting the parser again.
+#[derive(Clone, Default)]
+struct RecipeEdits {
+    authored_ingredients: Vec<Option<Quantity>>,
+    authored_timers: Vec<Option<Quantity>>,
+    authored_prep_minutes: Option<u32>,
+    /// Edited amount per ingredient; `None` keeps the authored quantity.
+    ingredients: Vec<Option<Quantity>>,
+    /// Edited duration per timer; `None` keeps the authored quantity.
+    timers: Vec<Option<Quantity>>,
+    /// The field whose inline input is open.
+    editing: Option<EditTarget>,
+    /// Text currently in that input, before it is committed.
+    draft: String,
+}
+
+impl RecipeEdits {
+    fn new(recipe: &Recipe) -> Self {
+        let converter = Converter::default();
+        let authored_prep_minutes = recipe
+            .metadata
+            .get(StdKey::PrepTime)
+            .and_then(|value| cooklang::metadata::CooklangValueExt::as_minutes(value, &converter));
+        Self {
+            authored_ingredients: recipe
+                .ingredients
+                .iter()
+                .map(|ingredient| ingredient.quantity.clone())
+                .collect(),
+            authored_timers: recipe
+                .timers
+                .iter()
+                .map(|timer| timer.quantity.clone())
+                .collect(),
+            authored_prep_minutes,
+            ingredients: vec![None; recipe.ingredients.len()],
+            timers: vec![None; recipe.timers.len()],
+            editing: None,
+            draft: String::new(),
+        }
+    }
+
+    /// The amount to show for an ingredient: the edit when present, else authored.
+    fn ingredient(&self, index: usize) -> Option<&Quantity> {
+        self.ingredients
+            .get(index)
+            .and_then(Option::as_ref)
+            .or_else(|| {
+                self.authored_ingredients
+                    .get(index)
+                    .and_then(Option::as_ref)
+            })
+    }
+
+    /// The duration to use for a timer: the edit when present, else authored.
+    fn timer(&self, index: usize) -> Option<&Quantity> {
+        self.timers
+            .get(index)
+            .and_then(Option::as_ref)
+            .or_else(|| self.authored_timers.get(index).and_then(Option::as_ref))
+    }
+
+    fn has_changes(&self) -> bool {
+        self.ingredients.iter().any(Option::is_some) || self.timers.iter().any(Option::is_some)
+    }
+}
+
+/// Open the inline editor for `target` after a deliberate press.
+fn arm_long_press(mut edits: Signal<RecipeEdits>, target: EditTarget, draft: String) {
+    let serial = LONG_PRESS_SERIAL.with_mut(|serial| {
+        *serial += 1;
+        *serial
+    });
+    LONG_PRESS.with_mut(|press| *press = Some((target, serial)));
+    spawn(async move {
+        tokio::time::sleep(Duration::from_millis(LONG_PRESS_MS)).await;
+        let still_pressed = LONG_PRESS
+            .read()
+            .is_some_and(|press| press == (target, serial));
+        if still_pressed {
+            cancel_long_press();
+            edits.with_mut(|edits| {
+                edits.editing = Some(target);
+                edits.draft = draft;
+            });
+        }
+    });
+}
+
+/// Disarm a press, either because it ended early or because editing started.
+fn cancel_long_press() {
+    LONG_PRESS.with_mut(|press| *press = None);
+}
+
+fn set_draft(mut edits: Signal<RecipeEdits>, value: String) {
+    edits.with_mut(|edits| edits.draft = value);
+}
+
+fn cancel_edit(mut edits: Signal<RecipeEdits>) {
+    edits.with_mut(|edits| {
+        edits.editing = None;
+        edits.draft.clear();
+    });
+}
+
+/// Close the inline editor, keeping a valid value and discarding anything else.
+///
+/// An empty or unparsable draft leaves the previous value in place, so a stray
+/// tap that opens and closes an input never erases an amount.
+fn commit_edit(mut edits: Signal<RecipeEdits>) {
+    let (target, draft) = {
+        let snapshot = edits.read();
+        let Some(target) = snapshot.editing else {
+            return;
+        };
+        (target, snapshot.draft.trim().to_owned())
+    };
+    let Some(value) = parse_value(&draft) else {
+        cancel_edit(edits);
+        return;
+    };
+    edits.with_mut(|edits| {
+        match target {
+            EditTarget::Ingredient(index) => {
+                let unit = edits
+                    .authored_ingredients
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .and_then(Quantity::unit)
+                    .map(str::to_owned);
+                let quantity = Quantity::new(value, unit);
+                let authored = edits
+                    .authored_ingredients
+                    .get(index)
+                    .and_then(Option::as_ref);
+                if let Some(slot) = edits.ingredients.get_mut(index) {
+                    *slot = (Some(&quantity) != authored).then_some(quantity);
+                }
+            }
+            EditTarget::Timer(index) => {
+                // Durations are edited as minutes, matching the timer prompt.
+                let quantity = Quantity::new(value, Some("min".to_owned()));
+                let authored = edits.authored_timers.get(index).and_then(Option::as_ref);
+                if let Some(slot) = edits.timers.get_mut(index) {
+                    *slot = (Some(&quantity) != authored).then_some(quantity);
+                }
+            }
+        }
+        edits.editing = None;
+        edits.draft.clear();
+    });
+}
+
+/// The text an ingredient's inline input starts with: its value, without unit.
+fn ingredient_draft(quantity: Option<&Quantity>) -> String {
+    quantity
+        .map(|quantity| quantity.value().to_string())
+        .unwrap_or_default()
+}
+
+/// The text a timer's inline input starts with, normalised to minutes.
+fn timer_draft(quantity: Option<&Quantity>) -> String {
+    let Some(quantity) = quantity else {
+        return String::new();
+    };
+    let Some(total_secs) = timers::timer_duration_secs(Some(quantity)) else {
+        // Keep an unusable authored value visible so it can be replaced.
+        return quantity.value().to_string();
+    };
+    match timers::timer_range_early_secs(Some(quantity)) {
+        Some(early_secs) => format!(
+            "{}-{}",
+            format_minutes(early_secs),
+            format_minutes(total_secs)
+        ),
+        None => format_minutes(total_secs),
+    }
+}
+
+/// Times recalculated from edited timers, in minutes: prep plus timer total.
+///
+/// Only timer edits trigger a recalculation. Prep time cannot be derived from
+/// timers, so it stays as authored; cook becomes the sum of every timer and the
+/// total is prep plus cook. `None` means "keep showing the authored metadata".
+fn auto_times(edits: &RecipeEdits) -> Option<(u32, u32, u32)> {
+    if !edits.timers.iter().any(Option::is_some) {
+        return None;
+    }
+    let cook_secs: u64 = (0..edits.authored_timers.len())
+        .filter_map(|index| timers::timer_duration_secs(edits.timer(index)))
+        .sum();
+    if cook_secs == 0 {
+        return None;
+    }
+    let prep = edits.authored_prep_minutes.unwrap_or(0);
+    let cook = u32::try_from(cook_secs.div_ceil(60)).unwrap_or(u32::MAX);
+    Some((prep, cook, prep.saturating_add(cook)))
+}
+
+/// The ingredient amount, rendered as an inline editor once long-pressed.
+fn render_ingredient_quantity(edits: Signal<RecipeEdits>, index: usize) -> Element {
+    let quantity = edits.read().ingredient(index).cloned();
+    let unit = quantity
+        .as_ref()
+        .and_then(Quantity::unit)
+        .unwrap_or_default()
+        .to_owned();
+    let amount = quantity
+        .as_ref()
+        .map(|quantity| quantity.value().to_string())
+        .unwrap_or_default();
+    let (is_editing, draft) = {
+        let snapshot = edits.read();
+        (
+            snapshot.editing == Some(EditTarget::Ingredient(index)),
+            snapshot.draft.clone(),
+        )
+    };
+
+    if is_editing {
+        return rsx! {
+            span { class: "ingredient-quantity ingredient-quantity-editing",
+                input {
+                    class: "inline-edit-input",
+                    r#type: "text",
+                    inputmode: "decimal",
+                    autocapitalize: "off",
+                    spellcheck: false,
+                    enterkeyhint: "done",
+                    value: draft,
+                    oninput: move |event| set_draft(edits, event.value()),
+                    onkeydown: move |event| match event.key() {
+                        Key::Enter => {
+                            event.prevent_default();
+                            commit_edit(edits);
+                        }
+                        Key::Escape => cancel_edit(edits),
+                        _ => {}
+                    },
+                    onblur: move |_| commit_edit(edits),
+                    // `autofocus` is unreliable for inputs added after load;
+                    // focusing explicitly also raises the on-screen keyboard.
+                    onmounted: move |event| {
+                        spawn(async move {
+                            let _ = event.set_focus(true).await;
+                        });
+                    },
+                    autofocus: true,
+                }
+                if !unit.is_empty() {
+                    span { class: "ingredient-unit", "{unit}" }
+                }
+            }
+        };
+    }
+
+    let draft = ingredient_draft(quantity.as_ref());
+    rsx! {
+        span { class: "ingredient-quantity",
+            span {
+                class: if quantity.is_some() { "editable-amount" } else { "editable-amount editable-amount-missing" },
+                onpointerdown: move |_| arm_long_press(edits, EditTarget::Ingredient(index), draft.clone()),
+                onpointerup: move |_| cancel_long_press(),
+                onpointercancel: move |_| cancel_long_press(),
+                onpointerleave: move |_| cancel_long_press(),
+                oncontextmenu: move |event| event.prevent_default(),
+                if quantity.is_some() { "{amount}" } else { "+" }
+            }
+            if !unit.is_empty() {
+                span { class: "ingredient-unit", "{unit}" }
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 struct BrowserState {
@@ -327,6 +628,8 @@ pub fn App() -> Element {
             if let Some(collection) = snapshot.collection.as_ref() {
                 if let Some(selected_path) = snapshot.selected_recipe.as_ref() {
                     RecipeDetail {
+                        // A new recipe starts from its own edit state.
+                        key: "{selected_path.display()}",
                         recipe: collection.recipes.iter().find(|recipe| &recipe.path == selected_path).cloned(),
                         on_back: move |_| state.write().selected_recipe = None,
                     }
@@ -528,6 +831,16 @@ fn EmptyState(title: &'static str, detail: &'static str) -> Element {
 
 #[component]
 fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -> Element {
+    // Called before the early return so a recipe that fails to parse still
+    // runs the same hooks. The component is keyed by recipe path, so switching
+    // recipes starts from a fresh edit state.
+    let initial_edits = recipe
+        .as_ref()
+        .and_then(|file| file.recipe.as_ref().ok())
+        .map(RecipeEdits::new)
+        .unwrap_or_default();
+    let edits = use_signal(|| initial_edits);
+
     let Some(recipe_file) = recipe else {
         return rsx! {
             button { id: "recipe-back-button", class: "quiet-button back-button", onclick: move |event| on_back.call(event), "‹ Back to recipes" }
@@ -540,6 +853,10 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
     // to the half-second tick, keeping inline countdowns and chips live.
     let _tick = TIMER_TICK.read();
     let timers_snapshot = ACTIVE_TIMERS.read().clone();
+    let has_changes = edits.read().has_changes();
+    let recalculated = auto_times(&edits.read());
+    let has_editable_fields =
+        parsed.is_some_and(|recipe| !recipe.ingredients.is_empty() || !recipe.timers.is_empty());
     let finished_timers = timers_snapshot
         .iter()
         .filter(|entry| entry.is_finished(timers::now_ms()))
@@ -575,7 +892,12 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
         section { class: "detail-page",
             header { class: "detail-heading",
                 p { class: "section-label", "RECIPE" }
-                h2 { "{recipe_file.title}" }
+                h2 {
+                    "{recipe_file.title}"
+                    if has_changes {
+                        span { class: "unsaved-dot", title: "Unsaved changes" }
+                    }
+                }
                 p { class: "recipe-file-path", "{recipe_file.path.display()}" }
                 if let Some(tags) = tags {
                     div { class: "tag-list detail-tags",
@@ -587,9 +909,19 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
                 }
                 div { class: "metadata-strip",
                     if let Some(servings) = servings { span { "Serves {servings}" } }
-                    if let Some(time) = prep_time { span { "Prep {time} min" } }
-                    if let Some(time) = cook_time { span { "Cook {time} min" } }
-                    if let Some(time) = total_time { span { class: "metadata-total", "Total {time} min" } }
+                    if let Some((prep, cook, total)) = recalculated {
+                        if prep > 0 { span { "Prep {prep} min" } }
+                        span { "Cook {cook} min" }
+                        span { class: "metadata-total", "Total {total} min" }
+                        span { class: "auto-tag", "auto from timers" }
+                    } else {
+                        if let Some(time) = prep_time { span { "Prep {time} min" } }
+                        if let Some(time) = cook_time { span { "Cook {time} min" } }
+                        if let Some(time) = total_time { span { class: "metadata-total", "Total {time} min" } }
+                    }
+                }
+                if has_editable_fields {
+                    p { class: "edit-hint", "Long-press a highlighted amount or timer to edit it." }
                 }
             }
 
@@ -609,9 +941,9 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
                     section { class: "detail-section ingredients-section",
                         h3 { "Ingredients" }
                         ul { class: "ingredient-list",
-                            for ingredient in parsed.ingredients.iter().filter(|ingredient| ingredient.modifiers().should_be_listed()) {
+                            for (index, ingredient) in parsed.ingredients.iter().enumerate().filter(|(_, ingredient)| ingredient.modifiers().should_be_listed()) {
                                 li {
-                                    span { class: "ingredient-amount", "{ingredient.quantity.as_ref().map(ToString::to_string).unwrap_or_default()}" }
+                                    {render_ingredient_quantity(edits, index)}
                                     span { class: "ingredient-name", "{ingredient.display_name()}" }
                                     if let Some(note) = ingredient.note.as_ref() { span { class: "ingredient-note", "{note}" } }
                                     if ingredient.modifiers().is_optional() { span { class: "optional-label", "optional" } }
@@ -630,7 +962,7 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
                                 if let Content::Step(step) = content {
                                     li { class: "method-step",
                                         for item in step.items.iter() {
-                                            {render_step_item(parsed, &recipe_path, &recipe_title, item, &timers_snapshot)}
+                                            {render_step_item(parsed, &recipe_path, &recipe_title, item, &timers_snapshot, edits)}
                                         }
                                     }
                                 }
@@ -667,27 +999,73 @@ fn RecipeDetail(recipe: Option<RecipeFile>, on_back: EventHandler<MouseEvent>) -
 
 /// Render one step item as text or, for timers, as a tappable pill.
 ///
-/// Tapping starts the timer with its authored duration; a timer without a
-/// usable duration opens the duration prompt instead. While a timer is
-/// counting or paused, tapping does nothing — its controls live on the chip in
-/// the timer bar. Tapping a finished timer restarts it.
+/// Tapping starts the timer with its current duration; a timer without a usable
+/// duration opens the duration prompt instead. While a timer is counting or
+/// paused, tapping does nothing — its controls live on the chip in the timer
+/// bar. Tapping a finished timer restarts it. Long-pressing a timer opens an
+/// inline duration editor instead of starting it.
 fn render_step_item(
     recipe: &Recipe,
     recipe_path: &str,
     recipe_title: &str,
     item: &Item,
     timers_snapshot: &[TimerEntry],
+    edits: Signal<RecipeEdits>,
 ) -> Element {
     match item {
         Item::Timer { index } => {
-            let Some(timer) = recipe.timers.get(*index) else {
+            // Copy the index out of the reference so event handlers can own it.
+            let timer_index = *index;
+            let Some(timer) = recipe.timers.get(timer_index) else {
                 return rsx! {};
             };
-            let id = format!("{recipe_path}#{index}");
+            let id = format!("{recipe_path}#{timer_index}");
             let label = timer.name.clone().unwrap_or_else(|| "Timer".to_owned());
             let recipe_title = recipe_title.to_owned();
-            let authored_secs = timers::timer_duration_secs(timer.quantity.as_ref());
-            let range_early_secs = timers::timer_range_early_secs(timer.quantity.as_ref());
+            let quantity = edits.read().timer(timer_index).cloned();
+            let authored_secs = timers::timer_duration_secs(quantity.as_ref());
+            let range_early_secs = timers::timer_range_early_secs(quantity.as_ref());
+            let (is_editing, draft) = {
+                let snapshot = edits.read();
+                (
+                    snapshot.editing == Some(EditTarget::Timer(timer_index)),
+                    snapshot.draft.clone(),
+                )
+            };
+            if is_editing {
+                return rsx! {
+                    span { class: "inline-timer inline-timer-editing",
+                        "⏱ {label} ·"
+                        input {
+                            class: "inline-timer-input",
+                            r#type: "text",
+                            inputmode: "decimal",
+                            autocapitalize: "off",
+                            spellcheck: false,
+                            enterkeyhint: "done",
+                            value: draft,
+                            oninput: move |event| set_draft(edits, event.value()),
+                            onkeydown: move |event| match event.key() {
+                                Key::Enter => {
+                                    event.prevent_default();
+                                    commit_edit(edits);
+                                }
+                                Key::Escape => cancel_edit(edits),
+                                _ => {}
+                            },
+                            onblur: move |_| commit_edit(edits),
+                            onmounted: move |event| {
+                                spawn(async move {
+                                    let _ = event.set_focus(true).await;
+                                });
+                            },
+                            autofocus: true,
+                        }
+                        span { "min" }
+                    }
+                };
+            }
+
             let entry = timers_snapshot.iter().find(|entry| entry.id == id).cloned();
             let now = timers::now_ms();
             let (display, state_class) = match &entry {
@@ -707,26 +1085,39 @@ fn render_step_item(
                     "inline-timer-idle",
                 ),
             };
+            let draft = timer_draft(quantity.as_ref());
             rsx! {
                 button {
                     class: "inline-timer {state_class}",
-                    onclick: move |_| match &entry {
-                        Some(entry) if entry.is_finished(timers::now_ms()) => timer_restart(id.clone()),
-                        Some(_) => {}
-                        None => match authored_secs {
-                            Some(secs) => timer_start(
-                                id.clone(),
-                                recipe_title.clone(),
-                                label.clone(),
-                                secs,
-                                range_early_secs,
-                            ),
-                            None => set_timer_prompt(Some(TimerPrompt {
-                                id: id.clone(),
-                                recipe_title: recipe_title.clone(),
-                                label: label.clone(),
-                            })),
-                        },
+                    onpointerdown: move |_| arm_long_press(edits, EditTarget::Timer(timer_index), draft.clone()),
+                    onpointerup: move |_| cancel_long_press(),
+                    onpointercancel: move |_| cancel_long_press(),
+                    onpointerleave: move |_| cancel_long_press(),
+                    oncontextmenu: move |event| event.prevent_default(),
+                    onclick: move |_| {
+                        // A long press already opened the editor; the release
+                        // must not also start the timer.
+                        if edits.read().editing == Some(EditTarget::Timer(timer_index)) {
+                            return;
+                        }
+                        match &entry {
+                            Some(entry) if entry.is_finished(timers::now_ms()) => timer_restart(id.clone()),
+                            Some(_) => {}
+                            None => match authored_secs {
+                                Some(secs) => timer_start(
+                                    id.clone(),
+                                    recipe_title.clone(),
+                                    label.clone(),
+                                    secs,
+                                    range_early_secs,
+                                ),
+                                None => set_timer_prompt(Some(TimerPrompt {
+                                    id: id.clone(),
+                                    recipe_title: recipe_title.clone(),
+                                    label: label.clone(),
+                                })),
+                            },
+                        }
                     },
                     "⏱ {label} · {display}"
                 }
