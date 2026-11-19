@@ -67,3 +67,4 @@ jobs:
           name: cooklang-client-android-release-apk
           path: target/dx/cooklang-client-android/release/android/app/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 1
+          archive: false
