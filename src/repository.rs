@@ -237,7 +237,10 @@ pub fn read_recipes(root: impl AsRef<Path>) -> io::Result<Vec<RecipeFile>> {
     collect_recipe_paths(root, root, &mut paths)?;
     paths.sort();
 
-    let parser = CooklangParser::new(Extensions::empty(), Converter::default());
+    // Timer ranges need structured values so the UI can start at the upper
+    // bound and schedule the lower-bound chime. Keep other parser extensions
+    // disabled until the app supports them deliberately.
+    let parser = CooklangParser::new(Extensions::RANGE_VALUES, Converter::default());
     let mut recipes = paths
         .into_iter()
         .map(|path| {
