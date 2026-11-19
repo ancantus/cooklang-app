@@ -298,11 +298,8 @@ button:disabled { cursor: default; opacity: .58; }
     content: "";
     transition: width .45s linear;
 }
-.timer-color-0 { --timer-fill: #dcebd9; --timer-track: #f2f6ef; }
-.timer-color-1 { --timer-fill: #d9e7de; --timer-track: #f1f6f2; }
-.timer-color-2 { --timer-fill: #f0e4cb; --timer-track: #faf6ed; }
-.timer-color-3 { --timer-fill: #e8dcd1; --timer-track: #f8f3ee; }
-.timer-color-4 { --timer-fill: #dce5e9; --timer-track: #f1f5f6; }
+.timer-range-green { --timer-fill: #dcebd9; --timer-track: #f2f6ef; }
+.timer-range-orange { --timer-fill: #f0d7be; --timer-track: #fbf3ea; }
 .timer-chip-main { z-index: 1; display: flex; min-width: 0; flex: 1; align-items: baseline; gap: .55rem; }
 .timer-chip-time { flex: 0 0 auto; color: var(--green-dark); font-size: .95rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .timer-chip-label { overflow: hidden; color: #34463a; font-size: .76rem; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }

@@ -83,17 +83,31 @@ fn set_timer_prompt(prompt: Option<TimerPrompt>) {
 }
 
 /// Start (or restart) a timer with a fresh countdown of `total_secs`.
-fn timer_start(id: String, recipe_title: String, label: String, total_secs: u64) {
+fn timer_start(
+    id: String,
+    recipe_title: String,
+    label: String,
+    total_secs: u64,
+    range_early_at_secs: Option<u64>,
+) {
     let now = timers::now_ms();
     ACTIVE_TIMERS.with_mut(|list| {
         if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
-            *entry = TimerEntry::start_at(&id, &recipe_title, &label, total_secs, now);
-        } else {
-            list.push(TimerEntry::start_at(
+            *entry = TimerEntry::start_with_range_at(
                 &id,
                 &recipe_title,
                 &label,
                 total_secs,
+                range_early_at_secs,
+                now,
+            );
+        } else {
+            list.push(TimerEntry::start_with_range_at(
+                &id,
+                &recipe_title,
+                &label,
+                total_secs,
+                range_early_at_secs,
                 now,
             ));
         }
@@ -110,6 +124,14 @@ fn timer_toggle_pause(id: String) {
                 Some(deadline) if deadline > now => {
                     entry.paused_remaining_secs = entry.remaining_secs(now);
                     entry.deadline_ms = None;
+                    entry.paused_range_remaining_secs = if entry.range_early_notified {
+                        None
+                    } else {
+                        entry.range_early_deadline_ms.map(|deadline| {
+                            u64::try_from(deadline.saturating_sub(now).div_ceil(1000)).unwrap_or(0)
+                        })
+                    };
+                    entry.range_early_deadline_ms = None;
                 }
                 // Finished timers stay finished; pausing would hide that.
                 Some(_) => {}
@@ -118,6 +140,12 @@ fn timer_toggle_pause(id: String) {
                         entry.deadline_ms =
                             Some(now + u128::from(entry.paused_remaining_secs) * 1000);
                         entry.paused_remaining_secs = 0;
+                        if !entry.range_early_notified {
+                            entry.range_early_deadline_ms = entry
+                                .paused_range_remaining_secs
+                                .take()
+                                .map(|secs| now + u128::from(secs) * 1000);
+                        }
                     }
                 }
             }
@@ -140,6 +168,10 @@ fn timer_add_minute(id: String) {
                 Some(_) => {
                     entry.deadline_ms = Some(now + 60_000);
                     entry.total_secs = 60;
+                    entry.range_early_at_secs = None;
+                    entry.range_early_deadline_ms = None;
+                    entry.paused_range_remaining_secs = None;
+                    entry.range_early_notified = false;
                     entry.notified = false;
                 }
                 None => {
@@ -159,6 +191,11 @@ fn timer_restart(id: String) {
         if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
             entry.deadline_ms = Some(now + u128::from(entry.total_secs) * 1000);
             entry.paused_remaining_secs = 0;
+            entry.range_early_deadline_ms = entry
+                .range_early_at_secs
+                .map(|secs| now + u128::from(secs) * 1000);
+            entry.paused_range_remaining_secs = None;
+            entry.range_early_notified = false;
             entry.notified = false;
         }
     });
@@ -181,15 +218,34 @@ fn start_timer_ticker() {
         dioxus::core::spawn_forever(async move {
             loop {
                 let now = timers::now_ms();
-                let has_unannounced_finished = ACTIVE_TIMERS
-                    .read()
-                    .iter()
-                    .any(|entry| entry.is_finished(now) && !entry.notified);
-                if has_unannounced_finished {
-                    announce_finished_timer();
+                let (early_chimes, final_chimes) =
+                    ACTIVE_TIMERS
+                        .read()
+                        .iter()
+                        .fold((0, 0), |(early, final_count), entry| {
+                            (
+                                early + if entry.is_range_early_due(now) { 1 } else { 0 },
+                                final_count
+                                    + if entry.is_finished(now) && !entry.notified {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                            )
+                        });
+                let chimes = early_chimes + final_chimes;
+                if chimes > 0 {
+                    announce_finished_timer(chimes);
                     ACTIVE_TIMERS.with_mut(|entries| {
-                        for entry in entries.iter_mut().filter(|entry| entry.is_finished(now)) {
-                            entry.notified = true;
+                        for entry in entries.iter_mut() {
+                            if entry.is_range_early_due(now) {
+                                entry.range_early_notified = true;
+                                entry.range_early_deadline_ms = None;
+                                entry.paused_range_remaining_secs = None;
+                            }
+                            if entry.is_finished(now) {
+                                entry.notified = true;
+                            }
                         }
                     });
                     persist_timers();
@@ -213,9 +269,8 @@ fn start_timer_ticker() {
 }
 
 /// Best-effort completion beep through the WebView; silent when blocked.
-fn announce_finished_timer() {
-    dioxus::document::eval(
-        r#"(function () {
+fn announce_finished_timer(chimes: usize) {
+    let script = r#"(function () {
             try {
                 var Context = window.AudioContext || window.webkitAudioContext;
                 if (!Context) { return; }
@@ -224,16 +279,24 @@ fn announce_finished_timer() {
                 var gain = context.createGain();
                 oscillator.type = "sine";
                 oscillator.frequency.value = 880;
-                gain.gain.value = 0.25;
                 oscillator.connect(gain);
                 gain.connect(context.destination);
+                var chimes = __CHIMES__;
+                for (var i = 0; i < chimes; i++) {
+                    var start = context.currentTime + i * 0.9;
+                    gain.gain.setValueAtTime(0, start);
+                    gain.gain.linearRampToValueAtTime(0.25, start + 0.03);
+                    gain.gain.setValueAtTime(0.25, start + 0.35);
+                    gain.gain.linearRampToValueAtTime(0, start + 0.48);
+                }
                 oscillator.start();
                 setTimeout(function () {
                     try { oscillator.stop(); context.close(); } catch (error) {}
-                }, 700);
+                }, chimes * 900);
             } catch (error) {}
-        })();"#,
-    );
+        })();"#
+        .replace("__CHIMES__", &chimes.to_string());
+    dioxus::document::eval(&script);
 }
 
 #[component]
@@ -624,6 +687,7 @@ fn render_step_item(
             let label = timer.name.clone().unwrap_or_else(|| "Timer".to_owned());
             let recipe_title = recipe_title.to_owned();
             let authored_secs = timers::timer_duration_secs(timer.quantity.as_ref());
+            let range_early_secs = timers::timer_range_early_secs(timer.quantity.as_ref());
             let entry = timers_snapshot.iter().find(|entry| entry.id == id).cloned();
             let now = timers::now_ms();
             let (display, state_class) = match &entry {
@@ -650,7 +714,13 @@ fn render_step_item(
                         Some(entry) if entry.is_finished(timers::now_ms()) => timer_restart(id.clone()),
                         Some(_) => {}
                         None => match authored_secs {
-                            Some(secs) => timer_start(id.clone(), recipe_title.clone(), label.clone(), secs),
+                            Some(secs) => timer_start(
+                                id.clone(),
+                                recipe_title.clone(),
+                                label.clone(),
+                                secs,
+                                range_early_secs,
+                            ),
                             None => set_timer_prompt(Some(TimerPrompt {
                                 id: id.clone(),
                                 recipe_title: recipe_title.clone(),
@@ -702,8 +772,8 @@ fn TimerBar() -> Element {
     let now = timers::now_ms();
     rsx! {
         div { class: "timer-bar", id: "timer-bar",
-            for (index, entry) in timers_snapshot.into_iter().enumerate() {
-                TimerChip { key: "{entry.id}", entry, now, color_index: index % 5 }
+            for entry in timers_snapshot {
+                TimerChip { key: "{entry.id}", entry, now }
             }
         }
     }
@@ -711,7 +781,7 @@ fn TimerBar() -> Element {
 
 /// One timer chip with its countdown and full controls.
 #[component]
-fn TimerChip(entry: TimerEntry, now: u128, color_index: usize) -> Element {
+fn TimerChip(entry: TimerEntry, now: u128) -> Element {
     let id = entry.id.clone();
     let pause_id = id.clone();
     let add_minute_id = id.clone();
@@ -733,6 +803,13 @@ fn TimerChip(entry: TimerEntry, now: u128, color_index: usize) -> Element {
     } else {
         "chip-running"
     };
+    let range_color_class = if entry.range_early_at_secs.is_some()
+        && (entry.range_early_notified || entry.is_range_early_due(now))
+    {
+        "timer-range-orange"
+    } else {
+        "timer-range-green"
+    };
     let remaining_secs = if finished {
         0
     } else if paused {
@@ -747,7 +824,7 @@ fn TimerChip(entry: TimerEntry, now: u128, color_index: usize) -> Element {
     };
     rsx! {
         div {
-            class: "timer-chip {state_class} timer-color-{color_index}",
+            class: "timer-chip {state_class} {range_color_class}",
             style: "--timer-progress: {progress}%",
             div { class: "timer-chip-main",
                 span { class: "timer-chip-time", "{time_text}" }
@@ -813,6 +890,7 @@ fn TimerPromptModal(prompt: TimerPrompt) -> Element {
                                     prompt.recipe_title.clone(),
                                     prompt.label.clone(),
                                     secs,
+                                    None,
                                 );
                                 set_timer_prompt(None);
                             }
