@@ -32,6 +32,18 @@ pub struct TimerEntry {
     pub deadline_ms: Option<u128>,
     /// Seconds left when the timer was paused; unused while running.
     pub paused_remaining_secs: u64,
+    /// Lower endpoint for a range timer's early completion chime.
+    #[serde(default)]
+    pub range_early_at_secs: Option<u64>,
+    /// Wall-clock time of the lower-endpoint chime while the timer is running.
+    #[serde(default)]
+    pub range_early_deadline_ms: Option<u128>,
+    /// Remaining lower-endpoint time while the timer is paused.
+    #[serde(default)]
+    pub paused_range_remaining_secs: Option<u64>,
+    /// Whether the range's lower endpoint has already chimed.
+    #[serde(default)]
+    pub range_early_notified: bool,
     /// Whether the timer's completion has been announced; announced timers are
     /// discarded from persistence the next time the app starts.
     #[serde(default)]
@@ -47,6 +59,18 @@ impl TimerEntry {
         total_secs: u64,
         now_ms: u128,
     ) -> Self {
+        Self::start_with_range_at(id, recipe_title, label, total_secs, None, now_ms)
+    }
+
+    /// Start a timer that can also chime at the lower endpoint of a range.
+    pub fn start_with_range_at(
+        id: &str,
+        recipe_title: &str,
+        label: &str,
+        total_secs: u64,
+        range_early_at_secs: Option<u64>,
+        now_ms: u128,
+    ) -> Self {
         Self {
             id: id.to_owned(),
             recipe_title: recipe_title.to_owned(),
@@ -54,6 +78,11 @@ impl TimerEntry {
             total_secs,
             deadline_ms: Some(now_ms + u128::from(total_secs) * 1000),
             paused_remaining_secs: 0,
+            range_early_at_secs,
+            range_early_deadline_ms: range_early_at_secs
+                .map(|secs| now_ms + u128::from(secs) * 1000),
+            paused_range_remaining_secs: None,
+            range_early_notified: false,
             notified: false,
         }
     }
@@ -82,6 +111,16 @@ impl TimerEntry {
     pub fn is_finished(&self, now_ms: u128) -> bool {
         self.deadline_ms.is_some_and(|deadline| deadline <= now_ms)
     }
+
+    /// Whether the lower-endpoint chime is due and has not been announced.
+    pub fn is_range_early_due(&self, now_ms: u128) -> bool {
+        self.range_early_at_secs.is_some()
+            && !self.range_early_notified
+            && (self
+                .range_early_deadline_ms
+                .is_some_and(|deadline| deadline <= now_ms)
+                || self.paused_range_remaining_secs == Some(0))
+    }
 }
 
 /// Wall-clock time in unix milliseconds; the reference for all deadlines.
@@ -105,7 +144,22 @@ pub fn timer_duration_secs(quantity: Option<&Quantity>) -> Option<u64> {
         Value::Range { end, .. } => end.value(),
         Value::Text(_) => return None,
     };
-    let minutes = match quantity.unit() {
+    quantity_value_secs(value, quantity.unit())
+}
+
+/// Resolve the lower endpoint used for a range timer's early chime.
+pub fn timer_range_early_secs(quantity: Option<&Quantity>) -> Option<u64> {
+    let quantity = quantity?;
+    let Value::Range { start, end } = quantity.value() else {
+        return None;
+    };
+    let start = quantity_value_secs(start.value(), quantity.unit())?;
+    let end = quantity_value_secs(end.value(), quantity.unit())?;
+    (start < end).then_some(start)
+}
+
+fn quantity_value_secs(value: f64, unit: Option<&str>) -> Option<u64> {
+    let minutes = match unit {
         Some(unit) => match unit.to_ascii_lowercase().as_str() {
             "s" | "sec" | "secs" | "second" | "seconds" => value / 60.0,
             "m" | "min" | "mins" | "minute" | "minutes" => value,
